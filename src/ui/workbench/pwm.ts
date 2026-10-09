@@ -1,11 +1,28 @@
-// PWM function lane: per-pin freq/duty editors. Each pin has its own
-// debounce timer (rp2 slices share frequency, so batching across pins would
-// be wrong anyway); release stops the output immediately.
-import { tf } from "../i18n";
+// PWM function lane: per-pin freq/duty editors. Frequency is entered either
+// via common-value presets or as mantissa + unit (Hz/kHz/MHz) so the chip
+// never needs a giant raw-Hz box. rp2 slices share frequency, so batching
+// across pins would be wrong anyway — each pin has its own debounce timer;
+// release stops the output immediately.
+import { t, tf } from "../i18n";
 import { NUM, R_PWM, type PwmParam } from "../model/pins";
 import { el, clamp } from "./dom";
 import { ICON } from "./icons";
 import type { FuncApi, FunctionDef } from "./types";
+
+const UNITS = [
+  { exp: 0, label: "Hz" },
+  { exp: 3, label: "kHz" },
+  { exp: 6, label: "MHz" },
+];
+const PRESETS = [1, 10, 100, 1e3, 1e4, 1e5, 1e6, 1e7, 2e7, 3e7];
+const FREQ_MAX = 3e7; // rp2 PWM tops out here (duty resolution shrinks fast)
+
+const autoExp = (hz: number) => (hz >= 1e6 ? 6 : hz >= 1e3 ? 3 : 0);
+
+const unitLabel = (hz: number) => {
+  const e = autoExp(hz);
+  return `${hz / 10 ** e} ${UNITS.find((u) => u.exp === e)!.label}`;
+};
 
 export class PwmDriver {
   private timers = new Map<number, ReturnType<typeof setTimeout>>();
@@ -55,24 +72,61 @@ export class PwmDriver {
   }
 }
 
-function numIn(
-  api: FuncApi,
-  n: number,
-  p: PwmParam,
-  which: "freq" | "duty",
-): HTMLElement {
+function selOpt(value: string, label: string): HTMLOptionElement {
+  const o = document.createElement("option");
+  o.value = value;
+  o.textContent = label;
+  return o;
+}
+
+function makeFreqCtl(api: FuncApi, n: number, p: PwmParam): HTMLElement[] {
+  const model = api.model;
+  const preset = el("pwm-sel", "select") as HTMLSelectElement;
+  const mant = el("pwm-in", "input") as HTMLInputElement;
+  const unit = el("pwm-sel", "select") as HTMLSelectElement;
+  preset.appendChild(selOpt("", t("pwm_preset")));
+  for (const hz of PRESETS) preset.appendChild(selOpt(String(hz), unitLabel(hz)));
+  for (const u of UNITS) unit.appendChild(selOpt(String(u.exp), u.label));
+  mant.type = "number";
+  mant.min = "0.01";
+  mant.step = "0.01";
+  mant.title = "Hz";
+  const exp = () => model.pwmUnit[n] || autoExp(p.freq);
+  const show = () => {
+    mant.value = String(p.freq / 10 ** exp());
+    unit.value = String(exp());
+    preset.value = PRESETS.includes(p.freq) ? String(p.freq) : "";
+  };
+  model.pwmUnit[n] = model.pwmUnit[n] || autoExp(p.freq);
+  show();
+  for (const e of [preset, mant, unit]) e.addEventListener("click", (ev) => ev.stopPropagation());
+  preset.addEventListener("change", () => {
+    const hz = Number(preset.value);
+    if (!hz) return;
+    p.freq = hz;
+    model.pwmUnit[n] = autoExp(hz);
+    show();
+    api.schedulePwm(n);
+  });
+  unit.addEventListener("change", () => {
+    model.pwmUnit[n] = Number(unit.value) || 0;
+    show();
+  });
+  mant.addEventListener("change", () => {
+    p.freq = clamp(Math.round((+mant.value || 0) * 10 ** exp()), 1, FREQ_MAX);
+    show();
+    api.schedulePwm(n);
+  });
+  return [preset, mant, unit];
+}
+
+function dutyIn(api: FuncApi, n: number, p: PwmParam): HTMLElement {
   const i = el("pwm-in", "input") as HTMLInputElement;
   i.type = "number";
-  if (which === "freq") {
-    i.min = "1"; i.max = "200000"; i.step = "1"; i.value = String(p.freq);
-    i.title = "Hz";
-  } else {
-    i.min = "0"; i.max = "100"; i.step = "1"; i.value = String(p.duty);
-    i.title = "%";
-  }
+  i.min = "0"; i.max = "100"; i.step = "1"; i.value = String(p.duty);
+  i.title = "%";
   i.addEventListener("change", () => {
-    if (which === "freq") p.freq = clamp(Math.round(+i.value || 1), 1, 200000);
-    else p.duty = clamp(+i.value || 0, 0, 100);
+    p.duty = clamp(+i.value || 0, 0, 100);
     api.schedulePwm(n);
   });
   i.addEventListener("click", (e) => e.stopPropagation());
@@ -99,7 +153,7 @@ export function makePwmDef(drv: PwmDriver): FunctionDef {
         e.textContent = s;
         return e;
       };
-      return { els: [numIn(api, n, p, "freq"), u("Hz"), numIn(api, n, p, "duty"), u("%")] };
+      return { els: [...makeFreqCtl(api, n, p), dutyIn(api, n, p), u("%")] };
     },
   };
 }

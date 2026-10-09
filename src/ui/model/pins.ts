@@ -14,6 +14,7 @@ export class PinModel extends Emitter {
   roles = new Uint8Array(NUM); // 0 = pool, else R_*
   pulls = new Uint8Array(NUM); // inputs: 0 up, 1 down, 2 none
   pwm: (PwmParam | null)[] = new Array(NUM).fill(null);
+  pwmUnit = new Uint8Array(NUM); // display exponent: 0 Hz, 3 kHz, 6 MHz
   devIn = 0;
   devOut = 0;
   devPwm = 0;

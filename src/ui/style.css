@@ -122,12 +122,20 @@ main { padding: 16px; }
 .chip .rel { border: 0; background: none; color: var(--dim); font-size: 13px; padding: 0 2px; line-height: 1; }
 .chip .rel:hover { color: var(--err); background: none; }
 .chip .pwm-in {
-  width: 62px;
+  width: 54px;
   background: #10161b;
   border: 1px solid var(--border);
   color: var(--fg);
   font: 11px var(--mono);
   padding: 1px 4px;
+}
+.chip .pwm-sel {
+  background: #10161b;
+  border: 1px solid var(--border);
+  color: var(--fg);
+  font: 11px var(--mono);
+  padding: 1px 2px;
+  border-radius: 0;
 }
 .chip .unit { font: 10px var(--mono); color: var(--dim); }
 #gpio.idle .wb-zone { pointer-events: none; opacity: 0.55; }
