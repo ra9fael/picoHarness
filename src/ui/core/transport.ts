@@ -1,8 +1,12 @@
 // Layer 1 — byte plumbing. Owns the Web Serial port and the single reader:
-// opens it, tees raw bytes ("raw") to the terminal, frames UTF-8 text into
-// lines ("line"), and survives transient read breaks by re-attaching the
-// reader as long as the port is alive. Emits "log" for wire-level chatter and
-// "gone" when the link actually died (unplugged / stream ended for good).
+// opens it, and byte-scans the inbound stream for two interleaved kinds of
+// data on the one CDC endpoint — ASCII text lines (framed on "\n", emitted as
+// "line", and teed to the terminal as "raw") and binary waveform frames
+// (0xAA 'W' + u16le len + payload, emitted as "frame" with the payload bytes).
+// Our text is pure ASCII JSON so the 0xAA magic can never occur inside it,
+// which makes the scan unambiguous. It survives transient read breaks by
+// re-attaching the reader as long as the port is alive. Emits "log" for
+// wire-level chatter and "gone" when the link actually died.
 // It knows nothing about JSON or commands.
 import { Emitter } from "./events";
 import { t, tf } from "../i18n";
@@ -16,6 +20,7 @@ export class Transport extends Emitter {
   private writer: any = null;
   private running = false;
   private buf = "";
+  private raw: number[] = [];
   private decoder = new TextDecoder();
   private encoder = new TextEncoder();
   private textBuf = "";
@@ -77,16 +82,7 @@ export class Transport extends Emitter {
         while (true) {
           const chunk = await reader.read();
           if (chunk.done) throw new Error("流结束");
-          this.emit("raw", chunk.value);
-          const text = this.decoder.decode(chunk.value, { stream: true });
-          this.pushText(text);
-          this.buf += text;
-          let idx: number;
-          while ((idx = this.buf.indexOf("\n")) >= 0) {
-            const line = this.buf.slice(0, idx).replace("\r", "").trim();
-            this.buf = this.buf.slice(idx + 1);
-            if (line) this.emit("line", line);
-          }
+          this.feedBytes(chunk.value);
         }
       } catch (e: any) {
         if (!this.running) break;
@@ -98,6 +94,7 @@ export class Transport extends Emitter {
         reader.releaseLock();
       } catch {}
       this.buf = "";
+      this.raw = [];
       this.decoder = new TextDecoder();
       await sleep(300);
       if (!this.running) break;
@@ -107,6 +104,55 @@ export class Transport extends Emitter {
     if (this.running) {
       this.running = false;
       this.emit("gone");
+    }
+  }
+
+  // Append a chunk to the byte buffer, then split it into text runs and
+  // complete binary frames. Bytes that could be the start of a not-yet-
+  // complete frame stay buffered until the rest arrives.
+  private feedBytes(bytes: Uint8Array): void {
+    for (let i = 0; i < bytes.length; i++) this.raw.push(bytes[i]);
+    this.drainRaw();
+  }
+
+  private drainRaw(): void {
+    const r = this.raw;
+    let pos = 0;
+    while (pos < r.length) {
+      const m = r.indexOf(0xaa, pos);
+      if (m < 0) {
+        this.feedText(r.slice(pos));
+        pos = r.length;
+        break;
+      }
+      if (m > pos) this.feedText(r.slice(pos, m));
+      pos = m;
+      if (pos + 1 >= r.length) break; // wait for the byte after 0xAA
+      if (r[pos + 1] !== 0x57) {
+        pos += 1; // spurious 0xAA in an ASCII stream — drop and keep scanning
+        continue;
+      }
+      if (pos + 4 > r.length) break; // wait for the u16 length
+      const len = r[pos + 2] | (r[pos + 3] << 8);
+      if (pos + 4 + len > r.length) break; // wait for the full payload
+      this.emit("frame", new Uint8Array(r.slice(pos + 4, pos + 4 + len)));
+      pos += 4 + len;
+    }
+    this.raw = r.slice(pos);
+  }
+
+  private feedText(bytes: number[]): void {
+    if (!bytes.length) return;
+    const u8 = new Uint8Array(bytes);
+    this.emit("raw", u8);
+    const text = this.decoder.decode(u8);
+    this.pushText(text);
+    this.buf += text;
+    let idx: number;
+    while ((idx = this.buf.indexOf("\n")) >= 0) {
+      const line = this.buf.slice(0, idx).replace("\r", "").trim();
+      this.buf = this.buf.slice(idx + 1);
+      if (line) this.emit("line", line);
     }
   }
 

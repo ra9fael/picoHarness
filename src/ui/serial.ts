@@ -15,6 +15,7 @@ export class SerialLink {
   onLog: (line: string) => void = () => {};
   onEvent: (msg: JsonMsg) => void = () => {};
   onRawData: (bytes: Uint8Array) => void = () => {};
+  onFrame: (payload: Uint8Array) => void = () => {};
   onStateChange: (state: LinkState) => void = () => {};
 
   private tp = new Transport();
@@ -23,6 +24,7 @@ export class SerialLink {
   constructor() {
     this.tp.on("log", (l: string) => this.onLog(l));
     this.tp.on("raw", (b: Uint8Array) => this.onRawData(b));
+    this.tp.on("frame", (b: Uint8Array) => this.onFrame(b));
     this.tp.on("line", (l: string) => this.rpc.feed(l));
     this.tp.on("gone", () => {
       this.rpc.failAll(t("err_link_closed"));
