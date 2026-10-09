@@ -4,10 +4,12 @@
 # (gpio / pwm / ...). Every driver must claim(n, who) a pin before touching
 # it and release(n) when done — the owner table is the single arbiter of pin
 # ownership, so functions can never fight over a pin implicitly.
-# Main loop is an asyncio task group: command_reader (non-blocking stdin via
-# sys.stdin.read(n), which returns None when idle) + gpio_monitor, which
+# Main loop is an asyncio task group: command_reader + gpio_monitor, which
 # pushes {"evt":"gpio_in","in":mask} on input level *edges* so the UI can be
-# event-driven instead of poll-only.
+# event-driven instead of poll-only. stdin idiom matters: read(n>1) blocks
+# until n chars arrive (replies then only flush when the NEXT request shows
+# up — real-hardware log showed 3s command timeouts); read(1) is the
+# documented non-blocking form, returning None when nothing is pending.
 import sys
 import json
 import asyncio
@@ -18,7 +20,7 @@ import analogio
 from pwmio import PWMOut
 
 APP = "PicoHarness"
-VERSION = "0.0.8-async"
+VERSION = "0.0.9-nbstdin"
 NUM_PINS = 27  # GP0..GP26
 
 MODE_UNUSED, MODE_IN, MODE_OUT = 0, 1, 2
@@ -322,22 +324,26 @@ send(
 async def command_reader():
     buf = ""
     while True:
-        try:
-            chunk = sys.stdin.read(256)  # non-blocking: None when idle
-        except OSError:
-            chunk = None
-        if chunk:
-            buf += chunk
-            while "\n" in buf:
-                line, buf = buf.split("\n", 1)
-                line = line.strip()
+        got = False
+        while True:
+            try:
+                ch = sys.stdin.read(1)  # non-blocking: None when nothing pending
+            except OSError:
+                ch = None
+            if not ch:
+                break
+            got = True
+            buf += ch
+            if ch == "\n":
+                line = buf.strip()
+                buf = ""
                 if not line:
                     continue
                 try:
                     dispatch(parse_req(line))
                 except ValueError:
                     send({"id": None, "ok": False, "error": "bad json"})
-        await asyncio.sleep(0.002)
+        await asyncio.sleep(0.002 if got else 0.01)
 
 
 async def gpio_monitor():
