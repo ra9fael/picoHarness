@@ -4,11 +4,13 @@
 # (gpio / pwm / ...). Every driver must claim(n, who) a pin before touching
 # it and release(n) when done — the owner table is the single arbiter of pin
 # ownership, so functions can never fight over a pin implicitly.
-# Note: CircuitPython has no select()/non-blocking stdin, so input levels are
-# sampled on demand (host polls gpio.state); the device cannot push gpio_in
-# events while blocked in readline().
+# Main loop is an asyncio task group: command_reader (non-blocking stdin via
+# sys.stdin.read(n), which returns None when idle) + gpio_monitor, which
+# pushes {"evt":"gpio_in","in":mask} on input level *edges* so the UI can be
+# event-driven instead of poll-only.
 import sys
 import json
+import asyncio
 
 import board
 import digitalio
@@ -16,7 +18,7 @@ import analogio
 from pwmio import PWMOut
 
 APP = "PicoHarness"
-VERSION = "0.0.7-arbiter"
+VERSION = "0.0.8-async"
 NUM_PINS = 27  # GP0..GP26
 
 MODE_UNUSED, MODE_IN, MODE_OUT = 0, 1, 2
@@ -317,14 +319,40 @@ send(
 )
 
 
-while True:
-    line = sys.stdin.readline()
-    if not line:
-        continue
-    line = line.strip()
-    if not line:
-        continue
-    try:
-        dispatch(parse_req(line))
-    except ValueError:
-        send({"id": None, "ok": False, "error": "bad json"})
+async def command_reader():
+    buf = ""
+    while True:
+        try:
+            chunk = sys.stdin.read(256)  # non-blocking: None when idle
+        except OSError:
+            chunk = None
+        if chunk:
+            buf += chunk
+            while "\n" in buf:
+                line, buf = buf.split("\n", 1)
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    dispatch(parse_req(line))
+                except ValueError:
+                    send({"id": None, "ok": False, "error": "bad json"})
+        await asyncio.sleep(0.002)
+
+
+async def gpio_monitor():
+    last = None
+    while True:
+        if in_idx:
+            cur = read_inputs()
+            if cur != last:
+                send({"evt": "gpio_in", "in": cur})
+                last = cur
+        await asyncio.sleep(0.05)
+
+
+async def main():
+    await asyncio.gather(command_reader(), gpio_monitor())
+
+
+asyncio.run(main())
