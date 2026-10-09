@@ -10,11 +10,15 @@ export const R_IN = 1, R_OUT = 2, R_PWM = 3, R_ADC = 4;
 
 export type PwmParam = { freq: number; duty: number };
 
+// pwmUnit stores the display exponent (-3 mHz, 0 Hz, 3 kHz, 6 MHz); this
+// sentinel instead means "auto-derive the unit from the frequency".
+export const PWM_UNIT_AUTO = -9;
+
 export class PinModel extends Emitter {
   roles = new Uint8Array(NUM); // 0 = pool, else R_*
   pulls = new Uint8Array(NUM); // inputs: 0 up, 1 down, 2 none
   pwm: (PwmParam | null)[] = new Array(NUM).fill(null);
-  pwmUnit = new Uint8Array(NUM); // display exponent: 0 Hz, 3 kHz, 6 MHz
+  pwmUnit = new Int8Array(NUM).fill(PWM_UNIT_AUTO); // display exponent; AUTO = follow freq
   adcFmt = new Uint8Array(NUM); // ADC chip display: 0 volts, 1 millivolts, 2 raw 16-bit
   devAdc: Record<number, number> = {}; // last raw reading per pin, from events
   devIn = 0;

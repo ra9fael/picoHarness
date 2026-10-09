@@ -1,28 +1,29 @@
-// PWM function lane: per-pin freq/duty editors. Frequency is entered either
-// via common-value presets or as mantissa + unit (Hz/kHz/MHz) so the chip
-// never needs a giant raw-Hz box. rp2 slices share frequency, so batching
-// across pins would be wrong anyway — each pin has its own debounce timer;
-// release stops the output immediately.
+// PWM function lane: per-pin freq/duty editors. Frequency = numeric preset
+// (mantissa) × unit preset (mHz/Hz/kHz/MHz) combined — no absolute-frequency
+// dropdown. Sub-1 Hz values are entered freely; the device answers honestly
+// (rp2 PWMOut only takes whole hertz, floor ~7.4 Hz). rp2 slices share
+// frequency, so batching across pins would be wrong anyway — each pin has its
+// own debounce timer; release stops the output immediately.
 import { t, tf } from "../i18n";
-import { NUM, R_PWM, type PwmParam } from "../model/pins";
+import { NUM, R_PWM, PWM_UNIT_AUTO, type PwmParam } from "../model/pins";
 import { el, clamp } from "./dom";
 import { ICON } from "./icons";
 import type { FuncApi, FunctionDef } from "./types";
 
 const UNITS = [
+  { exp: -3, label: "mHz" },
   { exp: 0, label: "Hz" },
   { exp: 3, label: "kHz" },
   { exp: 6, label: "MHz" },
 ];
-const PRESETS = [1, 10, 100, 1e3, 1e4, 1e5, 1e6, 1e7, 2e7, 3e7];
+const PRESETS = [1, 2, 5, 10, 20, 50, 100, 200, 500, 1000]; // numeric (mantissa) presets
 const FREQ_MAX = 3e7; // rp2 PWM tops out here (duty resolution shrinks fast)
 
-const autoExp = (hz: number) => (hz >= 1e6 ? 6 : hz >= 1e3 ? 3 : 0);
+const autoExp = (hz: number) => (hz >= 1e6 ? 6 : hz >= 1e3 ? 3 : hz >= 1 ? 0 : -3);
 
-const unitLabel = (hz: number) => {
-  const e = autoExp(hz);
-  return `${hz / 10 ** e} ${UNITS.find((u) => u.exp === e)!.label}`;
-};
+// mantissa × 10^exp lands on float noise (0.07 kHz → 70.00000000000001 Hz);
+// six-decimal rounding keeps the box and the wire value clean.
+const norm = (hz: number) => Math.round(hz * 1e6) / 1e6;
 
 export class PwmDriver {
   private timers = new Map<number, ReturnType<typeof setTimeout>>();
@@ -85,37 +86,39 @@ function makeFreqCtl(api: FuncApi, n: number, p: PwmParam): HTMLElement[] {
   const mant = el("pwm-in", "input") as HTMLInputElement;
   const unit = el("pwm-sel", "select") as HTMLSelectElement;
   preset.appendChild(selOpt("", t("pwm_preset")));
-  for (const hz of PRESETS) preset.appendChild(selOpt(String(hz), unitLabel(hz)));
+  for (const v of PRESETS) preset.appendChild(selOpt(String(v), String(v)));
   for (const u of UNITS) unit.appendChild(selOpt(String(u.exp), u.label));
   mant.type = "number";
   mant.min = "0.01";
   mant.step = "0.01";
-  mant.title = "Hz";
-  const exp = () => model.pwmUnit[n] || autoExp(p.freq);
+  // AUTO sentinel = "follow the frequency"; any real exponent (-3..6) is an explicit pick.
+  const exp = () => (model.pwmUnit[n] === PWM_UNIT_AUTO ? autoExp(p.freq) : model.pwmUnit[n]);
   const show = () => {
-    mant.value = String(p.freq / 10 ** exp());
+    const m = p.freq / 10 ** exp();
+    mant.value = String(m);
     unit.value = String(exp());
-    preset.value = PRESETS.includes(p.freq) ? String(p.freq) : "";
+    preset.value = PRESETS.includes(m) ? String(m) : "";
   };
-  model.pwmUnit[n] = model.pwmUnit[n] || autoExp(p.freq);
   show();
   for (const e of [preset, mant, unit]) e.addEventListener("click", (ev) => ev.stopPropagation());
   preset.addEventListener("change", () => {
-    const hz = Number(preset.value);
-    if (!hz) return;
-    p.freq = hz;
-    model.pwmUnit[n] = autoExp(hz);
+    const m = Number(preset.value);
+    if (!m) return;
+    p.freq = norm(clamp(m * 10 ** exp(), 0.001, FREQ_MAX));
     show();
     model.changed();
     api.schedulePwm(n);
   });
   unit.addEventListener("change", () => {
-    model.pwmUnit[n] = Number(unit.value) || 0;
+    const m = parseFloat(mant.value) || p.freq / 10 ** exp();
+    model.pwmUnit[n] = Number(unit.value); // 0 (Hz) is a real choice, not "unset"
+    p.freq = norm(clamp(m * 10 ** model.pwmUnit[n], 0.001, FREQ_MAX));
     show();
     model.changed();
+    api.schedulePwm(n);
   });
   mant.addEventListener("change", () => {
-    p.freq = clamp(Math.round((+mant.value || 0) * 10 ** exp()), 1, FREQ_MAX);
+    p.freq = norm(clamp((+mant.value || 0) * 10 ** exp(), 0.001, FREQ_MAX));
     show();
     model.changed();
     api.schedulePwm(n);

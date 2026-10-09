@@ -3,7 +3,7 @@
 // through the normal gpio.cfg sendNow + pwm drift-reconciliation path once
 // the link becomes ready, so no restore-time commands are needed here.
 import type { PinModel } from "./pins";
-import { NUM, R_PWM, R_ADC } from "./pins";
+import { NUM, R_PWM, R_ADC, PWM_UNIT_AUTO } from "./pins";
 
 const KEY = "picoharness-config-v1";
 
@@ -49,7 +49,7 @@ export function loadConfig(model: PinModel): number {
   model.roles.fill(0);
   model.pulls.fill(0);
   model.pwm.fill(null);
-  model.pwmUnit.fill(0);
+  model.pwmUnit.fill(PWM_UNIT_AUTO);
   model.adcFmt.fill(0);
   let count = 0;
   for (const s of obj.pins) {
@@ -57,12 +57,12 @@ export function loadConfig(model: PinModel): number {
     if (s.r !== 1 && s.r !== 2 && s.r !== 3 && s.r !== 4) continue;
     model.roles[s.n] = s.r;
     if (s.r === 1 && (s.p === 0 || s.p === 1 || s.p === 2)) model.pulls[s.n] = s.p;
-    if (s.r === R_PWM && typeof s.f === "number" && s.f >= 1) {
+    if (s.r === R_PWM && typeof s.f === "number" && s.f > 0) {
       model.pwm[s.n] = {
-        freq: Math.round(s.f),
+        freq: s.f, // keep float — mHz entries like 500 mHz = 0.5 Hz must survive a round trip
         duty: typeof s.d === "number" ? Math.min(Math.max(s.d, 0), 100) : 50,
       };
-      model.pwmUnit[s.n] = typeof s.u === "number" ? s.u : 0;
+      model.pwmUnit[s.n] = typeof s.u === "number" ? s.u : PWM_UNIT_AUTO;
     }
     if (s.r === R_ADC && typeof s.a === "number" && s.a >= 0 && s.a <= 2)
       model.adcFmt[s.n] = s.a;
