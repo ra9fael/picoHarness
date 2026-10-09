@@ -6,6 +6,9 @@ export type JsonMsg = {
   evt?: string;
   in?: number; // gpio_in event: live input level bitmask
   vals?: Record<string, number>; // adc event: raw readings keyed by pin
+  pins?: number[]; // adc_w frame: channel pins in column order
+  ms?: number; // adc_w frame: sample interval on the device
+  v?: number[][]; // adc_w frame: rows of raw readings, one per sample tick
   caps?: { pwm?: number[]; adc?: number[] };
 };
 

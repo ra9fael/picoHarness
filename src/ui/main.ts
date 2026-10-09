@@ -1,6 +1,7 @@
 import { SerialLink, type LinkState } from "./serial";
 import { ConsolePanel } from "./console";
 import { Workbench } from "./workbench/workbench";
+import { Scope } from "./workbench/scope";
 import { t, tf, getLang, setLang, type MsgKey } from "./i18n";
 
 const $ = (id: string) => document.getElementById(id) as HTMLElement;
@@ -36,6 +37,7 @@ const consolePanel = new ConsolePanel(
 );
 
 const wb = new Workbench(link, $("gpio"), (m) => consolePanel.note(m));
+const scope = new Scope(link, wb.model, (m) => consolePanel.note(m), $("scope"));
 
 function applyModeLabels() {
   const m = consolePanel.mode;
@@ -53,6 +55,7 @@ function syncUi() {
   btnConnect.disabled = !hasSerial || linkState === "connecting";
   btnPing.disabled = btnEcho.disabled = linkState !== "ready" || consolePanel.mode !== "monitor";
   wb.setActive(linkState === "ready" && consolePanel.mode === "monitor");
+  scope.setActive(linkState === "ready" && consolePanel.mode === "monitor");
 }
 
 function applyStaticLabels() {
@@ -61,6 +64,7 @@ function applyStaticLabels() {
   });
   btnLang.textContent = t("btn_lang");
   wb.refreshLang();
+  scope.refreshLang();
   applyModeLabels();
   const dock = $("console-dock");
   btnCollapse.textContent = dock.classList.contains("collapsed")
@@ -75,6 +79,10 @@ link.onStateChange = (s) => {
 };
 link.onEvent = (m) => {
   if (m.evt === "ready") return; // handshake notes are printed where awaited
+  if (m.evt === "adc_w") {
+    scope.onMsg(m); // batched waveform frames: drawn on rAF, never logged
+    return;
+  }
   if (m.evt === "gpio_in" || m.evt === "adc") {
     wb.onEvent(m); // live levels / ADC readings: handled silently, targeted refresh
     return;

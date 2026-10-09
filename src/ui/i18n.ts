@@ -65,6 +65,11 @@ const dict = {
     pull_none: "无",
     gpio_apply_fail: "GPIO 应用失败: {0}",
     gpio_cmd_fail: "GPIO 命令失败: {0}",
+    scope_label: "ADC 波形",
+    scope_run: "开始采集",
+    scope_stop: "停止采集",
+    scope_no_ch: "波形面板：未选择通道（先在 ADC 泳道绑定引脚，再点通道按钮）",
+    scope_max: "波形面板：最多同时 {0} 路通道",
   },
   en: {
     subtitle: "USB CDC",
@@ -127,6 +132,11 @@ const dict = {
     pull_none: "None",
     gpio_apply_fail: "GPIO apply failed: {0}",
     gpio_cmd_fail: "GPIO command failed: {0}",
+    scope_label: "ADC Waveform",
+    scope_run: "Start Capture",
+    scope_stop: "Stop Capture",
+    scope_no_ch: "Scope: no channels selected (bind pins in the ADC lane, then click channel buttons)",
+    scope_max: "Scope: at most {0} channels at a time",
   },
 };
 
