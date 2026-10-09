@@ -1,10 +1,10 @@
-// PWM function lane: per-pin freq/duty editors. Frequency = numeric preset
-// (mantissa) × unit preset (mHz/Hz/kHz/MHz) combined — no absolute-frequency
-// dropdown. Sub-1 Hz values are entered freely; the device answers honestly
-// (rp2 PWMOut only takes whole hertz, floor ~7.4 Hz). rp2 slices share
-// frequency, so batching across pins would be wrong anyway — each pin has its
-// own debounce timer; release stops the output immediately.
-import { t, tf } from "../i18n";
+// PWM function lane: per-pin freq/duty editors. One number box (with 1..1000
+// presets as datalist suggestions) × one unit pick (mHz/Hz/kHz/MHz). Sub-1 Hz
+// values are entered freely; the device answers honestly (rp2 PWMOut only
+// takes whole hertz, floor ~7.4 Hz). rp2 slices share frequency, so batching
+// across pins would be wrong anyway — each pin has its own debounce timer;
+// release stops the output immediately.
+import { tf } from "../i18n";
 import { NUM, R_PWM, PWM_UNIT_AUTO, type PwmParam } from "../model/pins";
 import { el, clamp } from "./dom";
 import { ICON } from "./icons";
@@ -80,35 +80,37 @@ function selOpt(value: string, label: string): HTMLOptionElement {
   return o;
 }
 
+function presetDatalist(): HTMLElement {
+  const existing = document.getElementById("pwm-mant-presets");
+  if (existing) return existing;
+  const dl = document.createElement("datalist");
+  dl.id = "pwm-mant-presets";
+  for (const v of PRESETS) {
+    const o = document.createElement("option");
+    o.value = String(v);
+    dl.appendChild(o);
+  }
+  document.body.appendChild(dl);
+  return dl;
+}
+
 function makeFreqCtl(api: FuncApi, n: number, p: PwmParam): HTMLElement[] {
   const model = api.model;
-  const preset = el("pwm-sel", "select") as HTMLSelectElement;
   const mant = el("pwm-in", "input") as HTMLInputElement;
   const unit = el("pwm-sel", "select") as HTMLSelectElement;
-  preset.appendChild(selOpt("", t("pwm_preset")));
-  for (const v of PRESETS) preset.appendChild(selOpt(String(v), String(v)));
   for (const u of UNITS) unit.appendChild(selOpt(String(u.exp), u.label));
   mant.type = "number";
   mant.min = "0.01";
   mant.step = "0.01";
+  mant.setAttribute("list", presetDatalist().id); // presets merge into the number box: click its arrow to pick 1..1000, or type
   // AUTO sentinel = "follow the frequency"; any real exponent (-3..6) is an explicit pick.
   const exp = () => (model.pwmUnit[n] === PWM_UNIT_AUTO ? autoExp(p.freq) : model.pwmUnit[n]);
   const show = () => {
-    const m = p.freq / 10 ** exp();
-    mant.value = String(m);
+    mant.value = String(p.freq / 10 ** exp());
     unit.value = String(exp());
-    preset.value = PRESETS.includes(m) ? String(m) : "";
   };
   show();
-  for (const e of [preset, mant, unit]) e.addEventListener("click", (ev) => ev.stopPropagation());
-  preset.addEventListener("change", () => {
-    const m = Number(preset.value);
-    if (!m) return;
-    p.freq = norm(clamp(m * 10 ** exp(), 0.001, FREQ_MAX));
-    show();
-    model.changed();
-    api.schedulePwm(n);
-  });
+  for (const e of [mant, unit]) e.addEventListener("click", (ev) => ev.stopPropagation());
   unit.addEventListener("change", () => {
     const m = parseFloat(mant.value) || p.freq / 10 ** exp();
     model.pwmUnit[n] = Number(unit.value); // 0 (Hz) is a real choice, not "unset"
@@ -123,7 +125,7 @@ function makeFreqCtl(api: FuncApi, n: number, p: PwmParam): HTMLElement[] {
     model.changed();
     api.schedulePwm(n);
   });
-  return [preset, mant, unit];
+  return [mant, unit];
 }
 
 function dutyIn(api: FuncApi, n: number, p: PwmParam): HTMLElement {
