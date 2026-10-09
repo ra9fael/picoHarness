@@ -1,6 +1,6 @@
 import { SerialLink, type LinkState } from "./serial";
 import { ConsolePanel } from "./console";
-import { GpioPanel } from "./gpio";
+import { Workbench } from "./workbench/workbench";
 import { t, tf, getLang, setLang, type MsgKey } from "./i18n";
 
 const $ = (id: string) => document.getElementById(id) as HTMLElement;
@@ -35,7 +35,7 @@ const consolePanel = new ConsolePanel(
   },
 );
 
-const gpioPanel = new GpioPanel(link, $("gpio"), (m) => consolePanel.note(m));
+const wb = new Workbench(link, $("gpio"), (m) => consolePanel.note(m));
 
 function applyModeLabels() {
   const m = consolePanel.mode;
@@ -52,7 +52,7 @@ function syncUi() {
   btnConnect.textContent = linkState === "closed" ? t("btn_connect") : t("btn_disconnect");
   btnConnect.disabled = !hasSerial || linkState === "connecting";
   btnPing.disabled = btnEcho.disabled = linkState !== "ready" || consolePanel.mode !== "monitor";
-  gpioPanel.setActive(linkState === "ready" && consolePanel.mode === "monitor");
+  wb.setActive(linkState === "ready" && consolePanel.mode === "monitor");
 }
 
 function applyStaticLabels() {
@@ -60,7 +60,7 @@ function applyStaticLabels() {
     el.textContent = t(el.dataset.i18n as MsgKey);
   });
   btnLang.textContent = t("btn_lang");
-  gpioPanel.refreshLang();
+  wb.refreshLang();
   applyModeLabels();
   const dock = $("console-dock");
   btnCollapse.textContent = dock.classList.contains("collapsed")
@@ -76,7 +76,7 @@ link.onStateChange = (s) => {
 link.onEvent = (m) => {
   if (m.evt === "ready") return; // handshake notes are printed where awaited
   if (m.evt === "gpio_in") {
-    gpioPanel.onEvent(m); // live levels: handled silently, LED-only refresh
+    wb.onEvent(m); // live levels: handled silently, LED-only refresh
     return;
   }
   consolePanel.note(tf("evt", JSON.stringify(m)));
@@ -91,7 +91,7 @@ btnConnect.addEventListener("click", async () => {
   }
   try {
     const ready = await link.connect();
-    gpioPanel.setCaps(ready.caps);
+    wb.setCaps(ready.caps);
     consolePanel.note(tf("handshake_ok", JSON.stringify(ready)));
   } catch (e: any) {
     consolePanel.note(tf("handshake_fail", e.message));
