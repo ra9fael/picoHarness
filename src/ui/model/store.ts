@@ -14,7 +14,7 @@ export type PinSnap = {
   f?: number;
   d?: number;
   u?: number;
-  a?: number; // ADC display format: 0 volts, 1 raw
+  a?: number; // ADC display format: 0 V, 1 mV, 2 raw
 };
 
 export function saveConfig(model: PinModel): void {
@@ -64,7 +64,8 @@ export function loadConfig(model: PinModel): number {
       };
       model.pwmUnit[s.n] = typeof s.u === "number" ? s.u : 0;
     }
-    if (s.r === R_ADC && (s.a === 0 || s.a === 1)) model.adcFmt[s.n] = s.a;
+    if (s.r === R_ADC && typeof s.a === "number" && s.a >= 0 && s.a <= 2)
+      model.adcFmt[s.n] = s.a;
     count++;
   }
   return count;

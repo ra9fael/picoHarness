@@ -8,12 +8,19 @@ import { el } from "./dom";
 import { ICON } from "./icons";
 import type { FuncApi, FunctionDef } from "./types";
 
+export const ADC_UNITS = ["V", "mV", "raw"] as const;
+
 export const adcText = (model: PinModel, n: number): string => {
   const raw = model.devAdc[n];
   if (raw === undefined) return "—";
-  return model.adcFmt[n]
-    ? String(raw)
-    : ((raw * 3.3) / 65535).toFixed(2) + " V";
+  switch (model.adcFmt[n] % 3) {
+    case 1:
+      return Math.round((raw * 3300) / 65535) + " mV";
+    case 2:
+      return String(raw);
+    default:
+      return ((raw * 3.3) / 65535).toFixed(2) + " V";
+  }
 };
 
 export class AdcDriver {
@@ -78,13 +85,13 @@ export function makeAdcDef(drv: AdcDriver): FunctionDef {
       val.textContent = adcText(model, n);
       const tg = el("mini", "button") as HTMLButtonElement;
       const show = () => {
-        tg.textContent = model.adcFmt[n] ? "raw" : "V";
+        tg.textContent = ADC_UNITS[model.adcFmt[n] % 3];
         val.textContent = adcText(model, n);
       };
       show();
       tg.addEventListener("click", (e) => {
         e.stopPropagation();
-        model.adcFmt[n] = model.adcFmt[n] ? 0 : 1;
+        model.adcFmt[n] = (model.adcFmt[n] + 1) % 3;
         model.changed();
         show();
       });

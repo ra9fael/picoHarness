@@ -5,7 +5,7 @@
 import { Emitter } from "../core/events";
 import type { JsonMsg } from "../types";
 
-export const NUM = 27;
+export const NUM = 29; // GP0..GP28, matching firmware NUM_PINS
 export const R_IN = 1, R_OUT = 2, R_PWM = 3, R_ADC = 4;
 
 export type PwmParam = { freq: number; duty: number };
@@ -15,7 +15,7 @@ export class PinModel extends Emitter {
   pulls = new Uint8Array(NUM); // inputs: 0 up, 1 down, 2 none
   pwm: (PwmParam | null)[] = new Array(NUM).fill(null);
   pwmUnit = new Uint8Array(NUM); // display exponent: 0 Hz, 3 kHz, 6 MHz
-  adcFmt = new Uint8Array(NUM); // ADC chip display: 0 volts, 1 raw 16-bit
+  adcFmt = new Uint8Array(NUM); // ADC chip display: 0 volts, 1 millivolts, 2 raw 16-bit
   devAdc: Record<number, number> = {}; // last raw reading per pin, from events
   devIn = 0;
   devOut = 0;
