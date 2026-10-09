@@ -22,8 +22,8 @@ import analogio
 from pwmio import PWMOut
 
 APP = "PicoHarness"
-VERSION = "0.1.0-adc"
-NUM_PINS = 27  # GP0..GP26
+VERSION = "0.1.1-montdbg"
+NUM_PINS = 29  # GP0..GP28: Pico-family boards expose up to GP28; on rp2040 GP27/28 are ADC1/ADC2
 
 MODE_UNUSED, MODE_IN, MODE_OUT = 0, 1, 2
 
@@ -394,12 +394,19 @@ async def command_reader():
 
 async def gpio_monitor():
     last = None
+    alive = False
     while True:
-        if in_idx:
-            cur = read_inputs()
-            if cur != last:
-                send({"evt": "gpio_in", "in": cur})
-                last = cur
+        try:
+            if not alive:
+                alive = True
+                send({"evt": "dbg", "task": "gpio", "alive": True})
+            if in_idx:
+                cur = read_inputs()
+                if cur != last:
+                    send({"evt": "gpio_in", "in": cur})
+                    last = cur
+        except Exception as e:  # never let a task die silently under gather
+            send({"evt": "dbg", "task": "gpio", "err": "%s: %s" % (type(e).__name__, e)})
         await asyncio.sleep(0.05)
 
 
@@ -408,25 +415,38 @@ ADC_DEADBAND = 328  # ~0.5% of the 16-bit span; keeps noise off the wire
 
 async def adc_monitor():
     sent = {}
+    alive = False
     while True:
-        vals = {}
-        for n in range(NUM_PINS):
-            if adc_obj[n] is not None:
-                vals[str(n)] = adc_obj[n].value
-        if vals:
-            moved = len(vals) != len(sent) or any(
-                abs(v - sent.get(k, -98304)) > ADC_DEADBAND for k, v in vals.items()
-            )
-            if moved:
-                send({"evt": "adc", "vals": vals})
-                sent = vals
-        else:
-            sent = {}
+        try:
+            if not alive:
+                alive = True
+                send({"evt": "dbg", "task": "adc", "alive": True})
+            vals = {}
+            for n in range(NUM_PINS):
+                if adc_obj[n] is not None:
+                    vals[str(n)] = adc_obj[n].value
+            if vals:
+                moved = len(vals) != len(sent) or any(
+                    abs(v - sent.get(k, -98304)) > ADC_DEADBAND for k, v in vals.items()
+                )
+                if moved:
+                    send({"evt": "adc", "vals": vals})
+                    sent = vals
+            else:
+                sent = {}
+        except Exception as e:
+            send({"evt": "dbg", "task": "adc", "err": "%s: %s" % (type(e).__name__, e)})
         await asyncio.sleep(0.1)
 
 
 async def main():
-    await asyncio.gather(command_reader(), gpio_monitor(), adc_monitor())
+    send({"evt": "dbg", "task": "main", "alive": True})
+    while True:
+        try:
+            await asyncio.gather(command_reader(), gpio_monitor(), adc_monitor())
+        except Exception as e:  # a dead gather = dead events; say so loudly
+            send({"evt": "dbg", "task": "gather", "err": "%s: %s" % (type(e).__name__, e)})
+            await asyncio.sleep(0.2)
 
 
 asyncio.run(main())
