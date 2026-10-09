@@ -70,6 +70,11 @@ const dict = {
     scope_stop: "停止采集",
     scope_no_ch: "波形面板：未选择通道（先在 ADC 泳道绑定引脚，再点通道按钮）",
     scope_max: "波形面板：最多同时 {0} 路通道",
+    scope_autox: "横向自适应",
+    scope_autoy: "纵向自适应",
+    scope_cal: "校正",
+    scope_fmt_bin: "struct 二进制",
+    scope_info: "{0} sps · 窗口 {1}s",
   },
   en: {
     subtitle: "USB CDC",
@@ -137,6 +142,11 @@ const dict = {
     scope_stop: "Stop Capture",
     scope_no_ch: "Scope: no channels selected (bind pins in the ADC lane, then click channel buttons)",
     scope_max: "Scope: at most {0} channels at a time",
+    scope_autox: "Auto X",
+    scope_autoy: "Auto Y",
+    scope_cal: "Cal",
+    scope_fmt_bin: "struct binary",
+    scope_info: "{0} sps · window {1}s",
   },
 };
 

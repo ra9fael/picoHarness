@@ -11,15 +11,15 @@ import type { FuncApi, FunctionDef } from "./types";
 export const ADC_UNITS = ["V", "mV", "raw"] as const;
 
 export const adcText = (model: PinModel, n: number): string => {
-  const raw = model.devAdc[n];
-  if (raw === undefined) return "—";
+  const v = model.adcVal(n);
+  if (v === undefined) return "—";
   switch (model.adcFmt[n] % 3) {
     case 1:
-      return Math.round((raw * 3300) / 65535) + " mV";
+      return Math.round((v * 3300) / 65535) + " mV";
     case 2:
-      return String(raw);
+      return String(Math.round(v));
     default:
-      return ((raw * 3.3) / 65535).toFixed(2) + " V";
+      return ((v * 3.3) / 65535).toFixed(2) + " V";
   }
 };
 
@@ -61,6 +61,7 @@ export class AdcDriver {
     if (timer) clearTimeout(timer);
     this.timers.delete(n);
     delete model.devAdc[n];
+    model.resetAdc(n);
     if (link.state === "ready") {
       link
         .sendCmd("adc.stop", { pin: n })

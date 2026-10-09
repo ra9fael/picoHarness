@@ -8,6 +8,11 @@ import type { JsonMsg } from "../types";
 export const NUM = 29; // GP0..GP28, matching firmware NUM_PINS
 export const R_IN = 1, R_OUT = 2, R_PWM = 3, R_ADC = 4;
 
+// EMA factor for the ADC chip readout: smooths the bursty deadband events into
+// a steady number. 0.3 tracks a real change within a few samples while killing
+// single-step jitter that otherwise makes the digits flicker every event.
+const ADC_ALPHA = 0.3;
+
 export type PwmParam = { freq: number; duty: number };
 
 // pwmUnit stores the display exponent (-3 mHz, 0 Hz, 3 kHz, 6 MHz); this
@@ -21,6 +26,7 @@ export class PinModel extends Emitter {
   pwmUnit = new Int8Array(NUM).fill(PWM_UNIT_AUTO); // display exponent; AUTO = follow freq
   adcFmt = new Uint8Array(NUM); // ADC chip display: 0 volts, 1 millivolts, 2 raw 16-bit
   devAdc: Record<number, number> = {}; // last raw reading per pin, from events
+  private adcSmooth = new Float64Array(NUM).fill(-1); // EMA of devAdc; -1 = unset
   devIn = 0;
   devOut = 0;
   devPwm = 0;
@@ -88,13 +94,37 @@ export class PinModel extends Emitter {
   // Edge-pushed input levels / ADC batches from firmware.
   applyEvent(m: JsonMsg): void {
     if (m.evt === "adc" && m.vals) {
-      for (const k in m.vals) this.devAdc[Number(k)] = m.vals[k];
-      this.emit("adc");
+      this.ingestAdc(m.vals);
       return;
     }
     if (m.evt !== "gpio_in" || typeof m.in !== "number") return;
     this.devIn = m.in >>> 0;
     this.emit("levels");
+  }
+
+  // Fold a batch of raw readings into devAdc + the EMA and flag a refresh.
+  // Fed both by deadband adc events (stream off) and by the newest row of each
+  // adc_w frame (stream on, JSON or binary), so the chip readout never freezes
+  // while the scope is running.
+  ingestAdc(vals: Record<number | string, number>): void {
+    for (const k in vals) {
+      const n = Number(k);
+      const raw = vals[k];
+      if (!Number.isInteger(n) || n < 0 || n >= NUM || typeof raw !== "number") continue;
+      this.devAdc[n] = raw;
+      const prev = this.adcSmooth[n];
+      this.adcSmooth[n] = prev < 0 ? raw : prev + ADC_ALPHA * (raw - prev);
+    }
+    this.emit("adc");
+  }
+
+  adcVal(n: number): number | undefined {
+    const v = this.adcSmooth[n];
+    return v < 0 ? undefined : v;
+  }
+
+  resetAdc(n: number): void {
+    this.adcSmooth[n] = -1;
   }
 
   // Adopt a device state payload. fromCmd=true means the reply is already

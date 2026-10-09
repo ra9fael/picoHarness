@@ -30,6 +30,8 @@ export class Workbench {
   private hintLock = 0;
   private pollT: ReturnType<typeof setInterval> | 0 = 0;
   private saveT: ReturnType<typeof setTimeout> | 0 = 0;
+  private adcDirty = false;
+  private adcT: ReturnType<typeof setInterval> | 0 = 0;
   private _active = false;
 
   constructor(
@@ -56,7 +58,18 @@ export class Workbench {
     this.adc = new AdcDriver(api);
     this.defs = [...makeDigitalDefs(this.digital), makePwmDef(this.pwm), makeAdcDef(this.adc)];
     this.model.on("levels", () => this.updateLeds());
-    this.model.on("adc", () => this.updateAdc());
+    // ADC events arrive in bursts (deadband) or once per stream batch; repaint
+    // the chip digits on a fixed 250 ms tick instead of per-event so a busy
+    // wire can't drive a layout storm, and the EMA has time to settle.
+    this.model.on("adc", () => {
+      this.adcDirty = true;
+    });
+    this.adcT = setInterval(() => {
+      if (this.adcDirty) {
+        this.adcDirty = false;
+        this.updateAdc();
+      }
+    }, 250);
     loadConfig(this.model);
     this.model.on("config", () => this.saveSoon());
 

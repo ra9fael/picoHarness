@@ -164,7 +164,13 @@ main { padding: 16px; }
 .pwm-freq.open .pwm-presets { display: grid; }
 .pwm-presets button { padding: 2px 6px; font: 11px var(--mono); }
 .chip .unit { font: 10px var(--mono); color: var(--dim); }
-.chip .adc-val { min-width: 52px; font: 11px var(--mono); color: var(--c-adc); text-align: right; }
+.chip .adc-val {
+  width: 66px;
+  font: 11px var(--mono);
+  font-variant-numeric: tabular-nums;
+  color: var(--c-adc);
+  text-align: right;
+}
 #gpio.idle .wb-zone { pointer-events: none; opacity: 0.55; }
 #scope {
   border: 1px solid var(--border);
@@ -190,6 +196,62 @@ main { padding: 16px; }
 .scope-body { height: 220px; position: relative; }
 .scope-body.hide { display: none; }
 .scope-canvas { position: absolute; inset: 0; width: 100%; height: 100%; }
+.scope-tools {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 10px;
+  border-bottom: 1px solid var(--border);
+  font: 11px var(--mono);
+}
+.scope-info { color: var(--dim); }
+.scope-tbtn {
+  background: none;
+  border: 1px solid var(--border);
+  color: var(--dim);
+  padding: 1px 8px;
+  font: 11px var(--mono);
+}
+.scope-tbtn:hover:not(:disabled) { color: var(--accent); border-color: var(--accent); }
+.scope-tbtn.on { color: var(--accent); border-color: var(--accent); }
+.scope-fmt {
+  background: #10161b;
+  border: 1px solid var(--border);
+  color: var(--fg);
+  font: 11px var(--mono);
+  padding: 1px 4px;
+  border-radius: 0;
+}
+.scope-cal {
+  display: none;
+  position: absolute;
+  right: 8px;
+  top: 8px;
+  z-index: 20;
+  background: #161c22;
+  border: 1px solid var(--border);
+  padding: 8px;
+  min-width: 200px;
+}
+.scope-cal.open { display: block; }
+.scope-cal-head { font: 600 11px var(--mono); color: var(--dim); margin-bottom: 6px; letter-spacing: 1px; }
+.scope-cal-empty { font: 11px var(--mono); color: var(--dim); }
+.scope-cal-row { display: flex; align-items: center; gap: 6px; margin-bottom: 4px; }
+.scope-cal-tag { font: 11px var(--mono); padding: 0 6px; border: 1px solid var(--border); }
+.scope-cal-tag.c0 { color: #c8a2d0; border-color: #c8a2d0; }
+.scope-cal-tag.c1 { color: #4fd0c0; border-color: #4fd0c0; }
+.scope-cal-tag.c2 { color: #e5c07b; border-color: #e5c07b; }
+.scope-cal-tag.c3 { color: #7fb2d4; border-color: #7fb2d4; }
+.scope-cal-fld { display: inline-flex; align-items: center; gap: 3px; }
+.scope-cal-lbl { font: 11px var(--mono); color: var(--dim); }
+.scope-cal-in {
+  width: 62px;
+  background: #10161b;
+  border: 1px solid var(--border);
+  color: var(--fg);
+  font: 11px var(--mono);
+  padding: 1px 4px;
+}
 #console-dock {
   border: 1px solid var(--border);
   background: #0b0e11;

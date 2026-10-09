@@ -38,6 +38,10 @@ const consolePanel = new ConsolePanel(
 
 const wb = new Workbench(link, $("gpio"), (m) => consolePanel.note(m));
 const scope = new Scope(link, wb.model, (m) => consolePanel.note(m), $("scope"));
+// Binary waveform frames bypass the JSON rpc layer entirely; the scope decodes
+// them and feeds the newest row back into the model for the chip readouts.
+link.onFrame = (payload) => scope.onFrame(payload);
+scope.onLatest = (vals) => wb.model.ingestAdc(vals);
 
 function applyModeLabels() {
   const m = consolePanel.mode;
