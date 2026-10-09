@@ -21,6 +21,12 @@ export class PinModel extends Emitter {
   sel: number | null = null;
   private pwmCaps: number[] | null = null; // firmware caps.pwm; null = unknown
 
+  // Drivers call this after any user-facing config mutation so the store
+  // can coalesce saves; "levels" is only about live pin values.
+  changed(): void {
+    this.emit("config");
+  }
+
   setCaps(caps: any): void {
     this.pwmCaps = Array.isArray(caps?.pwm) ? caps.pwm.map(Number) : null;
   }

@@ -106,15 +106,18 @@ function makeFreqCtl(api: FuncApi, n: number, p: PwmParam): HTMLElement[] {
     p.freq = hz;
     model.pwmUnit[n] = autoExp(hz);
     show();
+    model.changed();
     api.schedulePwm(n);
   });
   unit.addEventListener("change", () => {
     model.pwmUnit[n] = Number(unit.value) || 0;
     show();
+    model.changed();
   });
   mant.addEventListener("change", () => {
     p.freq = clamp(Math.round((+mant.value || 0) * 10 ** exp()), 1, FREQ_MAX);
     show();
+    model.changed();
     api.schedulePwm(n);
   });
   return [preset, mant, unit];
@@ -127,6 +130,7 @@ function dutyIn(api: FuncApi, n: number, p: PwmParam): HTMLElement {
   i.title = "%";
   i.addEventListener("change", () => {
     p.duty = clamp(+i.value || 0, 0, 100);
+    api.model.changed();
     api.schedulePwm(n);
   });
   i.addEventListener("click", (e) => e.stopPropagation());

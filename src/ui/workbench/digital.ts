@@ -82,6 +82,7 @@ export function makeDigitalDefs(drv: DigitalDriver): FunctionDef[] {
         e.stopPropagation();
         model.pulls[n] = (model.pulls[n] + 1) % 3;
         b.textContent = t(PULL_KEYS[model.pulls[n]]);
+        model.changed();
         api.scheduleGpio();
       });
       return { els: [lvl, b], levelEl: lvl };

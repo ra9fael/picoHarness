@@ -4,6 +4,7 @@
 // Adding I2C/SPI later = write a def module and push it into this.defs.
 import type { SerialLink, JsonMsg } from "../serial";
 import { PinModel, NUM } from "../model/pins";
+import { loadConfig, saveConfig } from "../model/store";
 import { t, tf, type MsgKey } from "../i18n";
 import { el } from "./dom";
 import type { FuncApi, FunctionDef } from "./types";
@@ -25,6 +26,7 @@ export class Workbench {
   private poolEl: HTMLElement;
   private hintLock = 0;
   private pollT: ReturnType<typeof setInterval> | 0 = 0;
+  private saveT: ReturnType<typeof setTimeout> | 0 = 0;
   private _active = false;
 
   constructor(
@@ -48,6 +50,8 @@ export class Workbench {
     this.pwm = new PwmDriver(api);
     this.defs = [...makeDigitalDefs(this.digital), makePwmDef(this.pwm)];
     this.model.on("levels", () => this.updateLeds());
+    loadConfig(this.model);
+    this.model.on("config", () => this.saveSoon());
 
     this.hintEl = el("wb-hint");
     this.poolEl = el("wb-zone wb-pool");
@@ -105,6 +109,15 @@ export class Workbench {
     this.model.applyEvent(m);
   }
 
+  // Coalesce bursts of edits into one localStorage write per quiet window.
+  private saveSoon(): void {
+    if (this.saveT) return;
+    this.saveT = setTimeout(() => {
+      this.saveT = 0;
+      saveConfig(this.model);
+    }, 400);
+  }
+
   async setActive(a: boolean): Promise<void> {
     if (a === this._active) return;
     this._active = a;
@@ -154,6 +167,7 @@ export class Workbench {
     if (old) old.release(this.api, n);
     this.model.roles[n] = role;
     if (def) def.assign(this.api, n);
+    this.model.changed();
     this.render();
   }
 
