@@ -75,8 +75,8 @@ link.onStateChange = (s) => {
 };
 link.onEvent = (m) => {
   if (m.evt === "ready") return; // handshake notes are printed where awaited
-  if (m.evt === "gpio_in") {
-    wb.onEvent(m); // live levels: handled silently, LED-only refresh
+  if (m.evt === "gpio_in" || m.evt === "adc") {
+    wb.onEvent(m); // live levels / ADC readings: handled silently, targeted refresh
     return;
   }
   consolePanel.note(tf("evt", JSON.stringify(m)));

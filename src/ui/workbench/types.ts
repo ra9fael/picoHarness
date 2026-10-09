@@ -16,11 +16,14 @@ export interface FuncApi {
   flipOut(n: number): void;
   schedulePwm(n: number): void; // debounced per-pin pwm.cfg push
   stopPwm(n: number): void;
+  scheduleAdc(n: number): void; // debounced per-pin adc.cfg claim
+  stopAdc(n: number): void;
 }
 
 export interface ChipView {
   els: HTMLElement[]; // interactive extras appended into the chip
   levelEl?: HTMLElement; // element whose "hi" class tracks the pin level
+  adcEl?: HTMLElement; // element whose text tracks the pin's ADC reading
 }
 
 export interface FunctionDef {

@@ -17,6 +17,7 @@
   --c-in: #7fb2d4;
   --c-out: #8fcf9a;
   --c-pwm: #e5c07b;
+  --c-adc: #c8a2d0;
 }
 * { box-sizing: border-box; border-radius: 0; }
 body {
@@ -93,6 +94,7 @@ main { padding: 16px; }
 .wb-lane.l-in .wb-lane-head { color: var(--c-in); }
 .wb-lane.l-out .wb-lane-head { color: var(--c-out); }
 .wb-lane.l-pwm .wb-lane-head { color: var(--c-pwm); }
+.wb-lane.l-adc .wb-lane-head { color: var(--c-adc); }
 .chip {
   display: inline-flex;
   align-items: center;
@@ -138,6 +140,7 @@ main { padding: 16px; }
   border-radius: 0;
 }
 .chip .unit { font: 10px var(--mono); color: var(--dim); }
+.chip .adc-val { min-width: 52px; font: 11px var(--mono); color: var(--c-adc); text-align: right; }
 #gpio.idle .wb-zone { pointer-events: none; opacity: 0.55; }
 #console-dock {
   border: 1px solid var(--border);

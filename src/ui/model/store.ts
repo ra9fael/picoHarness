@@ -3,11 +3,19 @@
 // through the normal gpio.cfg sendNow + pwm drift-reconciliation path once
 // the link becomes ready, so no restore-time commands are needed here.
 import type { PinModel } from "./pins";
-import { NUM, R_PWM } from "./pins";
+import { NUM, R_PWM, R_ADC } from "./pins";
 
 const KEY = "picoharness-config-v1";
 
-export type PinSnap = { n: number; r: number; p: number; f?: number; d?: number; u?: number };
+export type PinSnap = {
+  n: number;
+  r: number;
+  p: number;
+  f?: number;
+  d?: number;
+  u?: number;
+  a?: number; // ADC display format: 0 volts, 1 raw
+};
 
 export function saveConfig(model: PinModel): void {
   const pins: PinSnap[] = [];
@@ -21,6 +29,7 @@ export function saveConfig(model: PinModel): void {
       s.d = pw.duty;
       s.u = model.pwmUnit[n];
     }
+    if (r === R_ADC) s.a = model.adcFmt[n];
     pins.push(s);
   }
   try {
@@ -41,10 +50,11 @@ export function loadConfig(model: PinModel): number {
   model.pulls.fill(0);
   model.pwm.fill(null);
   model.pwmUnit.fill(0);
+  model.adcFmt.fill(0);
   let count = 0;
   for (const s of obj.pins) {
     if (typeof s?.n !== "number" || s.n < 0 || s.n >= NUM || !Number.isInteger(s.n)) continue;
-    if (s.r !== 1 && s.r !== 2 && s.r !== 3) continue;
+    if (s.r !== 1 && s.r !== 2 && s.r !== 3 && s.r !== 4) continue;
     model.roles[s.n] = s.r;
     if (s.r === 1 && (s.p === 0 || s.p === 1 || s.p === 2)) model.pulls[s.n] = s.p;
     if (s.r === R_PWM && typeof s.f === "number" && s.f >= 1) {
@@ -54,6 +64,7 @@ export function loadConfig(model: PinModel): number {
       };
       model.pwmUnit[s.n] = typeof s.u === "number" ? s.u : 0;
     }
+    if (s.r === R_ADC && (s.a === 0 || s.a === 1)) model.adcFmt[s.n] = s.a;
     count++;
   }
   return count;

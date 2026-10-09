@@ -5,6 +5,7 @@ export type JsonMsg = {
   data?: any;
   evt?: string;
   in?: number; // gpio_in event: live input level bitmask
+  vals?: Record<string, number>; // adc event: raw readings keyed by pin
   caps?: { pwm?: number[]; adc?: number[] };
 };
 

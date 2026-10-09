@@ -10,6 +10,7 @@ import { el } from "./dom";
 import type { FuncApi, FunctionDef } from "./types";
 import { DigitalDriver, makeDigitalDefs } from "./digital";
 import { PwmDriver, makePwmDef } from "./pwm";
+import { AdcDriver, makeAdcDef, adcText } from "./adc";
 
 const POLL_MS = 1000; // drift reconciliation; live levels come via gpio_in
 
@@ -18,10 +19,12 @@ export class Workbench {
   private api: FuncApi;
   private digital: DigitalDriver;
   private pwm: PwmDriver;
+  private adc: AdcDriver;
   private defs: FunctionDef[];
   private labEls = new Map<MsgKey, HTMLElement>();
   private zoneEls = new Map<number, HTMLElement>();
   private levelEls: (HTMLElement | null)[] = new Array(NUM).fill(null);
+  private adcEls: (HTMLElement | null)[] = new Array(NUM).fill(null);
   private hintEl: HTMLElement;
   private poolEl: HTMLElement;
   private hintLock = 0;
@@ -44,12 +47,16 @@ export class Workbench {
       flipOut: (n) => void this.digital.flipOut(n),
       schedulePwm: (n) => this.pwm.schedule(n),
       stopPwm: (n) => this.pwm.stop(n),
+      scheduleAdc: (n) => this.adc.schedule(n),
+      stopAdc: (n) => this.adc.stop(n),
     };
     this.api = api;
     this.digital = new DigitalDriver(api);
     this.pwm = new PwmDriver(api);
-    this.defs = [...makeDigitalDefs(this.digital), makePwmDef(this.pwm)];
+    this.adc = new AdcDriver(api);
+    this.defs = [...makeDigitalDefs(this.digital), makePwmDef(this.pwm), makeAdcDef(this.adc)];
     this.model.on("levels", () => this.updateLeds());
+    this.model.on("adc", () => this.updateAdc());
     loadConfig(this.model);
     this.model.on("config", () => this.saveSoon());
 
@@ -184,6 +191,7 @@ export class Workbench {
       const drift = this.model.applyState(r.data, false);
       if (drift.gpioDrift) this.digital.schedule();
       if (drift.pwmDrift) this.pwm.scheduleAll();
+      if (drift.adcDrift) this.adc.scheduleAll();
     } catch {}
   }
 
@@ -191,13 +199,17 @@ export class Workbench {
   private mkChip(n: number, def: FunctionDef | null): HTMLElement {
     const c = el("chip", "span");
     c.draggable = this._active;
-    const caps = this.model.capsKnown && this.model.pwmCap(n) ? "P" : "";
+    const caps =
+      (this.model.capsKnown && this.model.pwmCap(n) ? "P" : "") +
+      (this.model.capsKnown && this.model.adcCap(n) ? "A" : "");
     c.innerHTML = `<b>GP${n}</b>${caps ? `<span class="caps">${caps}</span>` : ""}`;
     this.levelEls[n] = null;
+    this.adcEls[n] = null;
     if (def) {
       const view = def.chip(this.api, n);
       c.append(...view.els);
       if (view.levelEl) this.levelEls[n] = view.levelEl;
+      if (view.adcEl) this.adcEls[n] = view.adcEl;
       const x = el("rel", "button") as HTMLButtonElement;
       x.textContent = "×";
       x.addEventListener("click", (e) => {
@@ -243,6 +255,7 @@ export class Workbench {
     this.poolEl.innerHTML = "";
     for (const z of this.zoneEls.values()) z.innerHTML = "";
     this.levelEls = new Array(NUM).fill(null);
+    this.adcEls = new Array(NUM).fill(null);
     for (let n = 0; n < NUM; n++) {
       const def = this.defOf(this.model.roles[n]);
       (def ? this.zoneEls.get(def.role)! : this.poolEl).appendChild(this.mkChip(n, def));
@@ -261,6 +274,13 @@ export class Workbench {
       const e = this.levelEls[n];
       if (!e) continue;
       e.classList.toggle("hi", !!this.model.level(n));
+    }
+  }
+
+  private updateAdc(): void {
+    for (let n = 0; n < NUM; n++) {
+      const e = this.adcEls[n];
+      if (e) e.textContent = adcText(this.model, n);
     }
   }
 }
