@@ -36,7 +36,7 @@ uv venv -p 3.12 --seed -n .venv
 
 ## 架构
 
-固件（`src/fw/code.py`，单文件部署）：`COMMANDS` 分发表按 cmd 路由到各功能驱动（gpio / pwm / adc）；`claim(n, who, force)` / `release(n)` 引脚所有权裁决是所有硬件操作的唯一入口，新增功能只需注册命令 + 实现自己的 claim 语义。主循环为 asyncio 任务（`command_reader` 非阻塞读 stdin + `gpio_monitor` 边沿推送 + `adc_monitor` 死区推送）。⚠️ CircuitPython 的 mpy 版 asyncio 的 `gather()` 是**按顺序 await 子任务**的（不像 CPython 并发调度）——把永不结束的 `command_reader` 放第一位会让后面的 monitor 永远得不到运行；因此 monitor 用 `create_task` 直接挂上事件循环，只 `await command_reader()`。
+固件（`src/fw/code.py`，单文件部署）：`COMMANDS` 分发表按 cmd 路由到各功能驱动（gpio / pwm / adc）；`claim(n, who, force)` / `release(n)` 引脚所有权裁决是所有硬件操作的唯一入口，新增功能只需注册命令 + 实现自己的 claim 语义。主循环为 asyncio 任务组（`command_reader` 读 stdin + `gpio_monitor` 边沿推送 + `adc_monitor` 死区推送），按官方 asyncio 指南的 blessed 模式：每个协程先 `create_task` 拿 Task 句柄、再 `await gather(t1, t2, t3)`（该 mpy 端口的 `gather()` 只接受 Task 对象，传裸协程会触发 `sleep_ms` 的 "missing await" 断言）。⚠️ 真机二分排查（A–F 变体）实锤的第一课：`sys.stdin.read(1)` 会**阻塞直到至少一个字节到达**，绝非"无数据返回 None"的非阻塞惯用法——不加门控时 command_reader 第一步就冻结整个事件循环、所有兄弟 monitor 任务永远饿死（这正是 ADC 无读数的根因）；正确姿势是 `select.poll()` 注册 stdin 后用 `while _stdin_poll.poll(0):` 门控每次读取。另注意：USB CDC 上 `print(..., flush=True)` 每次写完后抛 `OSError [Errno 22]`（文本已出，勿显式 flush）；mpy asyncio 端口本身是队列轮转调度器，`create_task` 并发没有缺陷（早前"gather 按顺序 await 饿死子任务"的诊断已被真机证伪）。
 
 UI（`src/ui/`）分三层，依赖单向向下：
 

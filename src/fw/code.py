@@ -7,14 +7,24 @@
 # Main loop is an asyncio task group: command_reader + gpio_monitor, which
 # pushes {"evt":"gpio_in","in":mask} on input level *edges*, + adc_monitor,
 # which pushes {"evt":"adc","vals":{pin:raw}} when any active channel moves
-# more than the deadband vs the last sent value. stdin idiom matters:
-# read(n>1) blocks until n chars arrive (replies then only flush when the
-# NEXT request shows up — real-hardware log showed 3s command timeouts);
-# read(1) is the documented non-blocking form, returning None when nothing
-# is pending. Second real-hardware lesson: the mpy asyncio port's gather()
-# awaits children *in order*, so a never-ending first task starves the rest —
-# monitors are hung with create_task instead and only command_reader is awaited.
+# more than the deadband vs the last sent value. Real-hardware lessons, in
+# the order they bit us:
+# 1. sys.stdin.read(1) BLOCKS until at least one byte arrives — it is NOT the
+#    non-blocking idiom. A bare read(1) poll in command_reader froze the whole
+#    loop and starved both monitors (binary-searched A-F on live hardware).
+#    Gate every read with select.poll() on stdin (POLLIN, timeout 0).
+# 2. read(n>1) blocks until n chars arrive, so replies only flush when the
+#    NEXT request shows up (earlier log showed 3s command timeouts).
+# 3. This port's gather() accepts Task objects only — passing bare coroutines
+#    trips sleep_ms's "missing await" assertion. Follow the official asyncio
+#    guide: create_task each coroutine, then await gather(task1, task2, ...).
+#    (An earlier "gather awaits children in order" diagnosis was WRONG; the
+#    mpy port is a plain queue-rotation scheduler and create_task concurrency
+#    works.)
+# 4. print(..., flush=True) raises OSError Errno 22 on USB CDC after the text
+#    is already written — never flush explicitly.
 import sys
+import select
 import json
 import asyncio
 
@@ -24,7 +34,7 @@ import analogio
 from pwmio import PWMOut
 
 APP = "PicoHarness"
-VERSION = "0.1.2-schedfix"
+VERSION = "0.1.3-stdinpoll"
 NUM_PINS = 29  # GP0..GP28: Pico-family boards expose up to GP28; on rp2040 GP27/28 are ADC1/ADC2
 
 MODE_UNUSED, MODE_IN, MODE_OUT = 0, 1, 2
@@ -378,15 +388,18 @@ send(
 )
 
 
+_stdin_poll = select.poll()
+_stdin_poll.register(sys.stdin, select.POLLIN)
+
+
 async def command_reader():
     buf = ""
     while True:
         got = False
-        while True:
-            try:
-                ch = sys.stdin.read(1)  # non-blocking: None when nothing pending
-            except OSError:
-                ch = None
+        # poll(0) = "is a byte already waiting?" — without this gate read(1)
+        # blocks here and no other task ever advances.
+        while _stdin_poll.poll(0):
+            ch = sys.stdin.read(1)
             if not ch:
                 break
             got = True
@@ -452,16 +465,12 @@ async def adc_monitor():
 
 async def main():
     send({"evt": "dbg", "task": "main", "alive": True})
-    # Real-hardware finding: this mpy asyncio port's gather() awaits children
-    # *in order* — with a never-ending command_reader first, the monitors
-    # after it never ran and no event was ever emitted. create_task puts all
-    # three on the loop's ready queue instead.
-    for coro in (gpio_monitor(), adc_monitor()):
-        try:
-            asyncio.create_task(coro)
-        except AttributeError:
-            asyncio.get_event_loop().create_task(coro)
-    await command_reader()
+    # Official asyncio guide pattern: create_task each coroutine, gather the
+    # Task handles (gather rejects bare coroutines on this port).
+    t_cmd = asyncio.create_task(command_reader())
+    t_gpio = asyncio.create_task(gpio_monitor())
+    t_adc = asyncio.create_task(adc_monitor())
+    await asyncio.gather(t_cmd, t_gpio, t_adc)
 
 
 asyncio.run(main())
