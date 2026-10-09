@@ -11,7 +11,9 @@
 # read(n>1) blocks until n chars arrive (replies then only flush when the
 # NEXT request shows up — real-hardware log showed 3s command timeouts);
 # read(1) is the documented non-blocking form, returning None when nothing
-# is pending.
+# is pending. Second real-hardware lesson: the mpy asyncio port's gather()
+# awaits children *in order*, so a never-ending first task starves the rest —
+# monitors are hung with create_task instead and only command_reader is awaited.
 import sys
 import json
 import asyncio
@@ -22,7 +24,7 @@ import analogio
 from pwmio import PWMOut
 
 APP = "PicoHarness"
-VERSION = "0.1.1-montdbg"
+VERSION = "0.1.2-schedfix"
 NUM_PINS = 29  # GP0..GP28: Pico-family boards expose up to GP28; on rp2040 GP27/28 are ADC1/ADC2
 
 MODE_UNUSED, MODE_IN, MODE_OUT = 0, 1, 2
@@ -180,12 +182,21 @@ def pwm_start(pin, freq, duty):
     if not claim(n, "pwm", force=True):  # steals plain-GPIO pins on purpose
         raise RuntimeError("pin busy")
     duty = max(0.0, min(1.0, float(duty)))
-    if pwm_obj[n]:
-        pwm_obj[n].frequency = int(freq)
-        pwm_obj[n].duty_cycle = int(duty * 65535)
+    freq = float(freq)
+    if freq < 1:
+        raise ValueError("freq < 1 Hz: PWMOut takes whole hertz (rp2 floor ~7.4 Hz)")
+    freq = int(freq)
+    dc = int(duty * 65535)
+    if pwm_obj[n] and pwm_par[n] and pwm_par[n][0] == freq:
+        pwm_obj[n].duty_cycle = dc
     else:
-        pwm_obj[n] = PWMOut(_pin(n), frequency=int(freq), duty_cycle=int(duty * 65535))
-    pwm_par[n] = (int(freq), duty)
+        # rp2 fixed-frequency PWMOut refuses .frequency writes ("Invalid
+        # variable_frequency", real-hardware log), so change of freq means
+        # tearing the object down and rebuilding it.
+        if pwm_obj[n]:
+            pwm_obj[n].deinit()
+        pwm_obj[n] = PWMOut(_pin(n), frequency=freq, duty_cycle=dc)
+    pwm_par[n] = (freq, duty)
 
 
 def pwm_stop(pin):
@@ -441,12 +452,16 @@ async def adc_monitor():
 
 async def main():
     send({"evt": "dbg", "task": "main", "alive": True})
-    while True:
+    # Real-hardware finding: this mpy asyncio port's gather() awaits children
+    # *in order* — with a never-ending command_reader first, the monitors
+    # after it never ran and no event was ever emitted. create_task puts all
+    # three on the loop's ready queue instead.
+    for coro in (gpio_monitor(), adc_monitor()):
         try:
-            await asyncio.gather(command_reader(), gpio_monitor(), adc_monitor())
-        except Exception as e:  # a dead gather = dead events; say so loudly
-            send({"evt": "dbg", "task": "gather", "err": "%s: %s" % (type(e).__name__, e)})
-            await asyncio.sleep(0.2)
+            asyncio.create_task(coro)
+        except AttributeError:
+            asyncio.get_event_loop().create_task(coro)
+    await command_reader()
 
 
 asyncio.run(main())
