@@ -1,0 +1,270 @@
+<!doctype html>
+<html lang="zh">
+<head>
+<meta charset="utf-8">
+<title>PicoHarness — IO 分配工作台（交互 mockup）</title>
+<style>
+:root{
+  --bg:#101418; --panel:#1a2027; --border:#2c3640; --fg:#d5dde5; --dim:#7a8896;
+  --accent:#3fb6a8; --err:#e06c5e;
+  --c-in:#7fb2d4; --c-out:#8fcf9a; --c-pwm:#e5c07b; --c-i2c:#c792ea;
+  --c-spi:#f07178; --c-uart:#56b6c2; --c-adc:#d19a66;
+  --mono:"Cascadia Code",Consolas,monospace;
+}
+*{box-sizing:border-box;border-radius:0}
+body{margin:0 auto;max-width:1180px;padding:16px;background:var(--bg);color:var(--fg);
+  font:14px/1.5 system-ui,"Segoe UI",sans-serif}
+h1{font-size:15px;margin:0 0 2px}
+.sub{color:var(--dim);font-size:12px;margin-bottom:14px}
+.sec{font:600 12px var(--mono);color:var(--dim);letter-spacing:1px;margin:16px 0 6px}
+#pool{display:flex;flex-wrap:wrap;gap:6px;border:1px solid var(--border);background:var(--panel);
+  padding:10px;min-height:64px}
+#pool.rel-target{border-color:var(--err)}
+#hint{font:12px var(--mono);color:var(--dim);margin:8px 0 4px;min-height:18px}
+#hint.act{color:var(--accent)}
+#lanes{display:grid;grid-template-columns:repeat(auto-fill,minmax(320px,1fr));gap:10px}
+.lane{border:1px solid var(--border);background:var(--panel);padding:10px}
+.lane-head{display:flex;align-items:center;gap:8px;margin-bottom:8px}
+.lane-head b{font:600 13px var(--mono);color:var(--c)}
+.lane-head svg{color:var(--c);flex:0 0 auto}
+.lane-note{font:11px var(--mono);color:var(--dim);margin-top:8px}
+.slots{display:flex;flex-wrap:wrap;gap:8px}
+.slot{display:flex;flex-direction:column;gap:3px}
+.slot-key{font:10px var(--mono);color:var(--dim);text-transform:uppercase;letter-spacing:1px}
+.zone{min-height:34px;border:1px dashed var(--border);padding:4px;display:flex;flex-wrap:wrap;
+  gap:5px;align-items:center}
+.zone .slotlab{font:11px var(--mono);color:#4a5866;padding-left:2px}
+.zone.compat{border-color:var(--accent);border-style:solid;background:#14231f;cursor:copy}
+.zone.dim{opacity:.3}
+.chip{display:inline-flex;align-items:center;gap:5px;border:1px solid var(--border);
+  background:#202832;padding:3px 7px;font:12px var(--mono);cursor:grab;user-select:none}
+.chip b{font-weight:600}
+.chip .caps{font-size:9px;color:var(--dim);letter-spacing:2px}
+.chip.sel{border-color:var(--accent);background:#26313c}
+.chip .mini{background:none;border:1px solid var(--border);color:var(--dim);
+  font:10px var(--mono);padding:0 5px;cursor:pointer}
+.chip .mini:hover{color:var(--accent);border-color:var(--accent)}
+.chip .led{width:11px;height:11px;background:#3a4652;border:1px solid var(--border);cursor:pointer;padding:0}
+.chip .led.hi{background:var(--accent);border-color:var(--accent)}
+.chip .rel{border:0;background:none;color:var(--dim);cursor:pointer;font-size:13px;padding:0 2px;line-height:1}
+.chip .rel:hover{color:var(--err)}
+.legend{display:flex;flex-wrap:wrap;gap:14px;margin-top:14px;font:11px var(--mono);color:var(--dim)}
+.legend i{display:inline-block;width:9px;height:9px;margin-right:4px;vertical-align:-1px}
+.foot{color:var(--dim);font-size:11px;margin-top:14px;border-top:1px solid var(--border);padding-top:10px}
+</style>
+</head>
+<body>
+<h1>IO 分配工作台 <span style="color:var(--dim);font-weight:400">交互 mockup</span></h1>
+<div class="sub">纯前端原型，不连设备。用法：<b>拖动</b> GP 芯片到亮色兼容槽位，或<b>先点芯片、再点槽位</b>；拖回顶部引脚池（或点 ×）释放占用。</div>
+
+<div class="sec">引脚池（未分配）</div>
+<div id="pool" class="zone" data-lane="pool"></div>
+<div id="hint"></div>
+
+<div class="sec">功能泳道</div>
+<div id="lanes"></div>
+
+<div class="legend">
+  <span><i style="background:var(--c-in)"></i>数字输入</span>
+  <span><i style="background:var(--c-out)"></i>数字输出</span>
+  <span><i style="background:var(--c-pwm)"></i>PWM</span>
+  <span><i style="background:var(--c-i2c)"></i>I2C</span>
+  <span><i style="background:var(--c-spi)"></i>SPI</span>
+  <span><i style="background:var(--c-uart)"></i>UART</span>
+  <span><i style="background:var(--c-adc)"></i>ADC</span>
+  <span style="margin-left:auto">芯片角标 P=PWM A=ADC S=SPI-SCK U=UART-TX</span>
+</div>
+
+<div class="foot">能力表（哪些脚能当 PWM/SPI…）为<b>示例值</b>，正式实现由固件在 ready 事件上报引脚能力表，UI 只做校验与呈现——避免前端硬编码与 CircuitPython 版本漂移。绑定/释放时 UI 调用对应功能命令（gpio.cfg / pwm.start / i2c…），本原型仅演示交互模型。</div>
+
+<script>
+"use strict";
+// —— 引脚能力表（示例；正式版由固件上报）——
+const CAPS = {
+  any: () => true,
+  pwm: n => n <= 15,
+  i2c: () => true,                       // RP2 上 PIO 实现，引脚灵活
+  spi_sck: n => [2, 6, 14, 18].includes(n),
+  spi_mosi: n => [3, 7, 11, 15, 19].includes(n),
+  spi_miso: n => [0, 4, 8, 12, 16].includes(n),
+  uart_tx: n => [0, 4, 8, 12, 16, 20].includes(n),
+  uart_rx: n => [1, 5, 9, 13, 17, 21].includes(n),
+  adc: n => n >= 26 && n <= 28,
+};
+const I = (p) => `<svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="square">${p}</svg>`;
+const ICON = {
+  in:  I('<path d="M2 12h9"/><path d="M8 8l4 4-4 4"/><rect x="14" y="5" width="8" height="14"/>'),
+  out: I('<rect x="2" y="5" width="8" height="14"/><path d="M13 12h9"/><path d="M18 8l4 4-4 4"/>'),
+  pwm: I('<polyline points="2,17 6,17 6,7 11,7 11,17 16,17 16,7 22,7"/>'),
+  i2c: I('<path d="M2 9c3-4 5 4 8 0s5 4 8 0" transform="translate(1,0)"/><path d="M2 15c3 4 5-4 8 0s5-4 8 0" transform="translate(1,0)"/>'),
+  spi: I('<rect x="8" y="4" width="8" height="16"/><path d="M2 8h6M2 12h6M2 16h6M16 12h6"/>'),
+  uart:I('<path d="M2 14c2 0 2-5 4-5s2 5 4 5 2-5 4-5 2 5 4 5"/><path d="M2 19h20"/>'),
+  adc: I('<path d="M2 10c2-5 4-5 6 0"/><path d="M10 14h2v-4h2V6h2V10h2v4h4"/>'),
+};
+const LANES = [
+  { id:"in",   name:"数字输入", c:"var(--c-in)",  icon:ICON.in,  list:true,
+    note:"任意 GP；绑定后点 U/D 切 上拉/下拉/无（沿用 gpio.cfg pd/pn）" },
+  { id:"out",  name:"数字输出", c:"var(--c-out)", icon:ICON.out, list:true,
+    note:"任意 GP；点 LED 即时翻转（沿用 gpio.out）" },
+  { id:"pwm",  name:"PWM 信号源", c:"var(--c-pwm)", icon:ICON.pwm,
+    slots:[["CH-A","pwm"],["CH-B","pwm"]], note:"每 slice 一对通道；兼容脚以固件能力表为准" },
+  { id:"i2c",  name:"I2C", c:"var(--c-i2c)", icon:ICON.i2c,
+    slots:[["SDA","i2c"],["SCL","i2c"]], note:"RP2 PIO 实现，引脚组合灵活" },
+  { id:"spi",  name:"SPI", c:"var(--c-spi)", icon:ICON.spi,
+    slots:[["SCK","spi_sck"],["MOSI","spi_mosi"],["MISO","spi_miso"],["CS","any"]],
+    note:"SCK 可选脚最少——建议先绑 SCK；CS 为软件片选" },
+  { id:"uart", name:"UART", c:"var(--c-uart)", icon:ICON.uart,
+    slots:[["TX","uart_tx"],["RX","uart_rx"]], note:"固定收发对（GP 偶/奇组合）" },
+  { id:"adc",  name:"ADC", c:"var(--c-adc)", icon:ICON.adc,
+    slots:[["ADC0","adc"],["ADC1","adc"],["ADC2","adc"],["温度","any"]],
+    note:"GP26–28；温度通道由固件固定" },
+];
+const NUM = 27;
+const loc  = new Array(NUM).fill(null);   // null | {lane, slot}（list 槽 slot=-1）
+const pull = new Array(NUM).fill(0);      // 输入：0 上拉 1 下拉 2 无
+const lv   = new Array(NUM).fill(0);      // 输出电平
+let sel = null;
+
+const $ = (s) => document.querySelector(s);
+const pool = $("#pool"), lanesEl = $("#lanes"), hintEl = $("#hint");
+
+// —— 静态骨架 ——
+LANES.forEach((l) => {
+  const card = document.createElement("div");
+  card.className = "lane";
+  card.style.setProperty("--c", l.c);
+  let body = "";
+  if (l.list) {
+    body = `<div class="zone listzone" data-lane="${l.id}" data-slot="-1"></div>`;
+  } else {
+    body = `<div class="slots">` + l.slots.map(([k, cap], i) =>
+      `<div class="slot"><span class="slot-key">${k}</span>` +
+      `<div class="zone slot-box" data-lane="${l.id}" data-slot="${i}"></div></div>`
+    ).join("") + `</div>`;
+  }
+  card.innerHTML =
+    `<div class="lane-head">${l.icon}<b>${l.name}</b></div>${body}` +
+    `<div class="lane-note">${l.note}</div>`;
+  lanesEl.appendChild(card);
+});
+const laneById = (id) => LANES.find((l) => l.id === id);
+const zoneEl = (lane, slot) =>
+  lane === "pool" ? pool : document.querySelector(`.zone[data-lane="${lane}"][data-slot="${slot}"]`);
+const capOf = (laneId, slotIdx) => {
+  const l = laneById(laneId);
+  return l.list ? "any" : l.slots[slotIdx][1];
+};
+
+// —— 渲染 ——
+function chipHtml(n) {
+  const caps = [["P","pwm"],["A","adc"],["S","spi_sck"],["U","uart_tx"]]
+    .filter(([, c]) => CAPS[c](n)).map(([k]) => k).join("");
+  let extra = "";
+  const at = loc[n];
+  if (at) extra = `<button class="rel" title="释放">×</button>`;
+  if (at && at.lane === "in")
+    extra = `<button class="mini pull">${["上拉","下拉","无"][pull[n]]}</button>` + extra;
+  if (at && at.lane === "out")
+    extra = `<button class="led${lv[n] ? " hi" : ""}" title="翻转"></button>` + extra;
+  return `<span class="chip${sel === n ? " sel" : ""}" draggable="true" data-pin="${n}">` +
+    `<b>GP${n}</b><span class="caps">${caps}</span>${extra}</span>`;
+}
+function render() {
+  const poolChips = [];
+  LANES.forEach((l) => {
+    if (l.list) zoneEl(l.id, -1).innerHTML = "";
+    else l.slots.forEach((_, i) => (zoneEl(l.id, i).innerHTML = `<span class="slotlab">拖入 / 点选</span>`));
+  });
+  for (let n = 0; n < NUM; n++) {
+    const at = loc[n];
+    if (!at) { poolChips.push(chipHtml(n)); continue; }
+    const z = at.slot < 0 ? zoneEl(at.lane, -1) : zoneEl(at.lane, at.slot);
+    z.innerHTML = chipHtml(n);
+  }
+  pool.innerHTML = poolChips.join("");
+  hl(sel);
+}
+function hl(n) {
+  document.querySelectorAll(".zone").forEach((z) => z.classList.remove("compat", "dim"));
+  if (n == null) { hintEl.className = ""; hintEl.textContent =
+    "点选或拖动 GP 芯片 → 亮色槽位可绑定；拖回引脚池释放。同一引脚只属于一个功能。"; return; }
+  hintEl.className = "act";
+  hintEl.textContent = `已选中 GP${n} — 点击亮色槽位绑定（占用者自动退回池中）`;
+  document.querySelectorAll(".zone[data-lane]").forEach((z) => {
+    const lane = z.dataset.lane;
+    if (lane === "pool") { z.classList.add("compat"); return; }
+    const ok = CAPS[capOf(lane, +z.dataset.slot)](n);
+    z.classList.add(ok ? "compat" : "dim");
+  });
+}
+
+// —— 分配逻辑 ——
+function assign(n, laneId, slotIdx) {
+  const l = laneById(laneId);
+  if (!CAPS[capOf(laneId, slotIdx)](n)) { flash(`GP${n} 与该槽位不兼容`); return false; }
+  if (loc[n]) evict(n);                       // 从旧位置摘除
+  if (!l.list) {
+    const old = l.slots[slotIdx].pin;          // 顶掉现占用者
+    if (old != null && old !== n) { l.slots[slotIdx].pin = null; loc[old] = null; }
+    l.slots[slotIdx].pin = n;
+  }
+  loc[n] = { lane: laneId, slot: l.list ? -1 : slotIdx };
+  return true;
+}
+function evict(n) {
+  const at = loc[n];
+  if (at && at.slot >= 0) laneById(at.lane).slots[at.slot].pin = null;
+  loc[n] = null;
+}
+function release(n) { evict(n); render(); }
+function flash(msg) { hintEl.className = ""; hintEl.textContent = msg; setTimeout(() => hl(sel), 1200); }
+
+// —— 事件（委托）——
+document.addEventListener("dragstart", (e) => {
+  const c = e.target.closest(".chip");
+  if (!c) return;
+  sel = +c.dataset.pin;
+  e.dataTransfer.setData("text/plain", String(sel));
+  e.dataTransfer.effectAllowed = "move";
+  render();
+});
+document.addEventListener("dragover", (e) => {
+  const z = e.target.closest(".zone");
+  if (z && (sel != null) &&
+      (z.dataset.lane === "pool" || z.classList.contains("compat"))) {
+    e.preventDefault();
+    e.dataTransfer.dropEffect = "move";
+  }
+});
+document.addEventListener("drop", (e) => {
+  const z = e.target.closest(".zone");
+  if (!z || sel == null) return;
+  e.preventDefault();
+  const n = +e.dataTransfer.getData("text/plain");
+  sel = n;
+  if (z.dataset.lane === "pool") release(n);
+  else if (assign(n, z.dataset.lane, +z.dataset.slot)) { sel = null; render(); }
+  else render();
+});
+document.addEventListener("dragend", () => { if (sel != null) render(); });
+document.addEventListener("click", (e) => {
+  const chip = e.target.closest(".chip");
+  if (chip) {
+    const n = +chip.dataset.pin;
+    if (e.target.closest(".rel")) { if (sel === n) sel = null; release(n); return; }
+    if (e.target.closest(".pull")) { pull[n] = (pull[n] + 1) % 3; render(); return; }
+    if (e.target.closest(".led")) { lv[n] ^= 1; render(); return; }
+    sel = sel === n ? null : n; render(); return;
+  }
+  const z = e.target.closest(".zone");
+  if (z && z.dataset.lane !== "pool") {
+    if (sel != null && assign(sel, z.dataset.lane, +z.dataset.slot)) { sel = null; render(); }
+    return;
+  }
+  if (sel != null) { sel = null; render(); }
+});
+
+render();
+</script>
+</body>
+</html>

@@ -1,0 +1,95 @@
+// Debug console: xterm.js terminal fed by the raw serial stream.
+// Monitor mode = read-only mirror; REPL mode = keyboard passthrough to >>>.
+import { Terminal } from "@xterm/xterm";
+import { FitAddon } from "@xterm/addon-fit";
+import type { SerialLink } from "./serial";
+import { t, tf } from "./i18n";
+
+const C = {
+  tx: "\x1b[38;5;75m",
+  sys: "\x1b[38;5;245m",
+  err: "\x1b[38;5;203m",
+  reset: "\x1b[0m",
+};
+
+export class ConsolePanel {
+  private term: Terminal;
+  private fit: FitAddon;
+  mode: "monitor" | "repl" = "monitor";
+
+  constructor(
+    private link: SerialLink,
+    mount: HTMLElement,
+    private onModeChange: (m: "monitor" | "repl") => void = () => {},
+  ) {
+    this.term = new Terminal({
+      fontSize: 12,
+      fontFamily: '"Cascadia Code", Consolas, monospace',
+      cursorBlink: true,
+      disableStdin: true,
+      theme: {
+        background: "#0b0e11",
+        foreground: "#d5dde5",
+        cursor: "#3fb6a8",
+      },
+    });
+    this.fit = new FitAddon();
+    this.term.loadAddon(this.fit);
+    this.term.open(mount);
+    this.fit.fit();
+
+    this.term.writeln(C.sys + t("welcome") + C.reset);
+
+    link.onRawData = (b) => this.term.write(b);
+    link.onLog = (line) => {
+      if (line.startsWith("<<")) this.term.writeln(C.tx + line + C.reset);
+      else if (line.startsWith("!!")) this.term.writeln(C.err + line + C.reset);
+      // ">>" and "  " noise already shown via raw stream; skip duplicates.
+    };
+
+    this.term.onData((d) => {
+      if (this.mode === "repl") this.link.writeRaw(d).catch(() => {});
+    });
+
+    new ResizeObserver(() => this.fit.fit()).observe(mount);
+  }
+
+  async setMode(mode: "monitor" | "repl") {
+    if (mode === this.mode) return;
+    this.mode = mode;
+    this.term.options.disableStdin = mode !== "repl";
+    this.onModeChange(this.mode);
+    if (mode === "repl") {
+      this.term.writeln(C.sys + t("repl_enter") + C.reset);
+      const ok = await this.link.enterRepl();
+      if (ok) {
+        this.term.writeln(C.sys + t("repl_ready") + C.reset);
+      } else {
+        this.term.writeln(C.err + t("repl_fail") + C.reset);
+      }
+      if (this.mode === "repl") this.term.focus();
+    } else {
+      this.term.writeln(C.sys + t("back_monitor") + C.reset);
+      try {
+        const ready = await this.link.rehandshake();
+        this.term.writeln(C.sys + tf("monitor_ready", JSON.stringify(ready)) + C.reset);
+      } catch (e: any) {
+        this.term.writeln(C.err + tf("handshake_short", e.message) + C.reset);
+      }
+    }
+  }
+
+  reset() {
+    this.mode = "monitor";
+    this.term.options.disableStdin = true;
+    this.onModeChange(this.mode);
+  }
+
+  clear() {
+    this.term.clear();
+  }
+
+  note(msg: string) {
+    this.term.writeln(C.sys + msg + C.reset);
+  }
+}

@@ -1,0 +1,34 @@
+<!doctype html>
+<html lang="zh">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>PicoHarness</title>
+  <style>/*__STYLE__*/</style>
+</head>
+<body>
+  <header>
+    <h1>PicoHarness <small class="subtitle" data-i18n="subtitle">USB CDC</small></h1>
+    <span id="status">未连接</span>
+    <button id="btn-connect">连接设备</button>
+    <button id="btn-ping" data-i18n="btn_ping" disabled>Ping</button>
+    <button id="btn-echo" data-i18n="btn_echo" disabled>Echo</button>
+    <button id="btn-lang" title="Switch language">EN</button>
+  </header>
+  <main>
+    <section id="gpio" class="idle"></section>
+    <div id="console-dock">
+      <div id="console-bar">
+        <span class="label" data-i18n="console_label">控制台</span>
+        <span id="mode-tag">监听</span>
+        <span class="spacer"></span>
+        <button id="btn-mode">进入 REPL</button>
+        <button id="btn-clear" data-i18n="btn_clear">清屏</button>
+        <button id="btn-collapse" data-i18n="btn_collapse">收起</button>
+      </div>
+      <div id="term"></div>
+    </div>
+  </main>
+  <script>/*__BUNDLE__*/</script>
+</body>
+</html>
