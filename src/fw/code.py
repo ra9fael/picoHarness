@@ -7,8 +7,10 @@
 # Main loop is an asyncio task group: command_reader + gpio_monitor, which
 # pushes {"evt":"gpio_in","in":mask} on input level *edges*, + adc_monitor,
 # which pushes {"evt":"adc","vals":{pin:raw}} when any active channel moves
-# more than the deadband vs the last sent value. Real-hardware lessons, in
-# the order they bit us:
+# more than the deadband vs the last sent value, + adc_streamer, which (while
+# adc.stream is on, and keeping adc_monitor quiet) ships batched waveform
+# frames {"evt":"adc_w","pins":[...],"ms":dt,"v":[[...],...]}. Real-hardware
+# lessons, in the order they bit us:
 # 1. sys.stdin.read(1) BLOCKS until at least one byte arrives — it is NOT the
 #    non-blocking idiom. A bare read(1) poll in command_reader froze the whole
 #    loop and starved both monitors (binary-searched A-F on live hardware).
@@ -25,6 +27,7 @@
 #    is already written — never flush explicitly.
 import sys
 import select
+import time
 import json
 import asyncio
 
@@ -34,7 +37,7 @@ import analogio
 from pwmio import PWMOut
 
 APP = "PicoHarness"
-VERSION = "0.1.3-stdinpoll"
+VERSION = "0.1.4-adcstream"
 NUM_PINS = 29  # GP0..GP28: Pico-family boards expose up to GP28; on rp2040 GP27/28 are ADC1/ADC2
 
 MODE_UNUSED, MODE_IN, MODE_OUT = 0, 1, 2
@@ -241,6 +244,34 @@ def adc_stop(pin):
         release(n)
 
 
+# —— ADC waveform streaming (scope feed) ——
+# While STREAM is active the deadband adc_monitor stays quiet and the
+# adc_streamer task ships whole batches instead: one event per batch keeps
+# the wire (and the browser) at ~1Hz no matter how many channels run.
+STREAM = None  # {"pins": tuple, "ms": int, "batch": int} | None
+
+
+def adc_stream(args):
+    global STREAM
+    if not args.get("on"):
+        STREAM = None
+        return {"ok": True, "data": {"stream": None}}
+    ps = []
+    for p in args.get("pins") or []:
+        n = int(p)
+        if not 0 <= n < NUM_PINS:
+            raise ValueError("pin out of range")
+        if adc_obj[n] is None:
+            raise ValueError("adc not configured on GP%d" % n)
+        ps.append(n)
+    if not ps:
+        raise ValueError("no pins given")
+    ms = max(10, int(args.get("ms", 50)))
+    batch = max(1, min(100, int(args.get("batch", 20))))
+    STREAM = {"pins": tuple(ps), "ms": ms, "batch": batch}
+    return {"ok": True, "data": {"stream": {"pins": ps, "ms": ms, "batch": batch}}}
+
+
 # —— capability probe ——
 def probe_caps():
     # Ask CircuitPython itself which pins support PWM / ADC instead of
@@ -359,6 +390,7 @@ COMMANDS = {
     "pwm.stop": cmd_pwm_stop,
     "adc.cfg": cmd_adc_cfg,
     "adc.stop": cmd_adc_stop,
+    "adc.stream": adc_stream,
 }
 
 
@@ -445,22 +477,46 @@ async def adc_monitor():
             if not alive:
                 alive = True
                 send({"evt": "dbg", "task": "adc", "alive": True})
-            vals = {}
-            for n in range(NUM_PINS):
-                if adc_obj[n] is not None:
-                    vals[str(n)] = adc_obj[n].value
-            if vals:
-                moved = len(vals) != len(sent) or any(
-                    abs(v - sent.get(k, -98304)) > ADC_DEADBAND for k, v in vals.items()
-                )
-                if moved:
-                    send({"evt": "adc", "vals": vals})
-                    sent = vals
-            else:
-                sent = {}
+            if STREAM is None:
+                vals = {}
+                for n in range(NUM_PINS):
+                    if adc_obj[n] is not None:
+                        vals[str(n)] = adc_obj[n].value
+                if vals:
+                    moved = len(vals) != len(sent) or any(
+                        abs(v - sent.get(k, -98304)) > ADC_DEADBAND for k, v in vals.items()
+                    )
+                    if moved:
+                        send({"evt": "adc", "vals": vals})
+                        sent = vals
+                else:
+                    sent = {}
         except Exception as e:
             send({"evt": "dbg", "task": "adc", "err": "%s: %s" % (type(e).__name__, e)})
         await asyncio.sleep(0.1)
+
+
+async def adc_streamer():
+    global STREAM
+    buf = []
+    while True:
+        s = STREAM
+        if not s:
+            buf = []
+            await asyncio.sleep(0.1)
+            continue
+        t0 = time.monotonic()
+        try:
+            buf.append([adc_obj[n].value for n in s["pins"]])
+            if len(buf) >= s["batch"]:
+                send({"evt": "adc_w", "pins": list(s["pins"]), "ms": s["ms"], "v": buf})
+                buf = []
+        except Exception as e:
+            send({"evt": "dbg", "task": "stream", "err": "%s: %s" % (type(e).__name__, e)})
+            STREAM = None
+            buf = []
+        dt = s["ms"] / 1000.0 - (time.monotonic() - t0)
+        await asyncio.sleep(dt if dt > 0.001 else 0.001)
 
 
 async def main():
@@ -470,7 +526,8 @@ async def main():
     t_cmd = asyncio.create_task(command_reader())
     t_gpio = asyncio.create_task(gpio_monitor())
     t_adc = asyncio.create_task(adc_monitor())
-    await asyncio.gather(t_cmd, t_gpio, t_adc)
+    t_stream = asyncio.create_task(adc_streamer())
+    await asyncio.gather(t_cmd, t_gpio, t_adc, t_stream)
 
 
 asyncio.run(main())
