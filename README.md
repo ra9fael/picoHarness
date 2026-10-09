@@ -27,7 +27,8 @@ uv venv -p 3.12 --seed -n .venv
 
 1. 用 [CircuitPython UF2](https://circuitpython.org/board/raspberry_pi_pico/)（Pico W 用 pico_w 版）烧写 Pico，得到 CIRCUITPY 卷。
 2. 把 `src/fw/code.py` 复制到 CIRCUITPY 根目录。
-3. 用桌面版 Chrome/Edge 打开 `dist/index.html`，点"连接设备"，在串口选择器中选择板子。
+3. **安装固件依赖**：CircuitPython 不内置 asyncio，`code.py` 的事件循环依赖第三方库（含 `adafruit_ticks`）。推荐用 circup：`pip install circup && circup install asyncio`（自动带依赖，版本随 CP 匹配）；手工装则从 Library Bundle 取 `asyncio`（对应 CP 大版本的 mpy 包）与 `adafruit_ticks` 放入 `CIRCUITPY/lib/`。缺库时 code.py 会报 `ImportError: no module named 'asyncio'`。
+4. 用桌面版 Chrome/Edge 打开 `dist/index.html`，点"连接设备"，在串口选择器中选择板子。
 
 ## 协议
 
