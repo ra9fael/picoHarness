@@ -3,7 +3,7 @@
 // through the normal gpio.cfg sendNow + pwm drift-reconciliation path once
 // the link becomes ready, so no restore-time commands are needed here.
 import type { PinModel } from "./pins";
-import { NUM, R_PWM, R_ADC, PWM_UNIT_AUTO } from "./pins";
+import { SLOTS, R_PWM, R_ADC, PWM_UNIT_AUTO } from "./pins";
 
 const KEY = "picoharness-config-v1";
 
@@ -19,7 +19,7 @@ export type PinSnap = {
 
 export function saveConfig(model: PinModel): void {
   const pins: PinSnap[] = [];
-  for (let n = 0; n < NUM; n++) {
+  for (let n = 0; n < SLOTS; n++) {
     const r = model.roles[n];
     if (!r) continue;
     const s: PinSnap = { n, r, p: model.pulls[n] };
@@ -53,7 +53,7 @@ export function loadConfig(model: PinModel): number {
   model.adcFmt.fill(0);
   let count = 0;
   for (const s of obj.pins) {
-    if (typeof s?.n !== "number" || s.n < 0 || s.n >= NUM || !Number.isInteger(s.n)) continue;
+    if (typeof s?.n !== "number" || s.n < 0 || s.n >= SLOTS || !Number.isInteger(s.n)) continue;
     if (s.r !== 1 && s.r !== 2 && s.r !== 3 && s.r !== 4) continue;
     model.roles[s.n] = s.r;
     if (s.r === 1 && (s.p === 0 || s.p === 1 || s.p === 2)) model.pulls[s.n] = s.p;

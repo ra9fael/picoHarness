@@ -195,7 +195,8 @@ main { padding: 16px; }
 .scope-chan.on.c3 { background: #7fb2d4; border-color: #7fb2d4; color: #0a1622; }
 .scope-body { height: 220px; position: relative; }
 .scope-body.hide { display: none; }
-.scope-canvas { position: absolute; inset: 0; width: 100%; height: 100%; }
+.scope-canvas { position: absolute; inset: 0; width: 100%; height: 100%; cursor: crosshair; }
+.scope-canvas.grabbing { cursor: grabbing; }
 .scope-tools {
   display: flex;
   align-items: center;

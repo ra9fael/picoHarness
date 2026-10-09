@@ -3,7 +3,7 @@
 // reconciliation poll; all function-specific behavior lives in the defs.
 // Adding I2C/SPI later = write a def module and push it into this.defs.
 import type { SerialLink, JsonMsg } from "../serial";
-import { PinModel, NUM } from "../model/pins";
+import { PinModel, SLOTS, TEMP, R_ADC, pinLabel } from "../model/pins";
 import { loadConfig, saveConfig } from "../model/store";
 import { t, tf, type MsgKey } from "../i18n";
 import { el } from "./dom";
@@ -23,8 +23,8 @@ export class Workbench {
   private defs: FunctionDef[];
   private labEls = new Map<MsgKey, HTMLElement>();
   private zoneEls = new Map<number, HTMLElement>();
-  private levelEls: (HTMLElement | null)[] = new Array(NUM).fill(null);
-  private adcEls: (HTMLElement | null)[] = new Array(NUM).fill(null);
+  private levelEls: (HTMLElement | null)[] = new Array(SLOTS).fill(null);
+  private adcEls: (HTMLElement | null)[] = new Array(SLOTS).fill(null);
   private hintEl: HTMLElement;
   private poolEl: HTMLElement;
   private hintLock = 0;
@@ -97,7 +97,7 @@ export class Workbench {
       z.addEventListener("drop", (e) => {
         e.preventDefault();
         const n = Number(e.dataTransfer?.getData("text/plain"));
-        if (Number.isInteger(n) && n >= 0 && n < NUM) this.assign(n, role);
+        if (Number.isInteger(n) && n >= 0 && n < SLOTS) this.assign(n, role);
       });
     }
     document.addEventListener("click", (e) => {
@@ -167,6 +167,7 @@ export class Workbench {
     const cur = model.roles[n];
     if (role === 0) return cur !== 0;
     if (cur === role) return false;
+    if (n === TEMP && role !== R_ADC) return false; // temperature is ADC-only
     const def = this.defOf(role);
     if (!def || !def.accept(this.api, n)) return false;
     return this.link.state === "ready";
@@ -175,7 +176,7 @@ export class Workbench {
   private assign(n: number, role: number): void {
     const def = this.defOf(role);
     if (role !== 0 && (!def || !def.accept(this.api, n))) {
-      this.hintFail(tf("hint_no_pwm", n));
+      this.hintFail(tf("hint_no_pwm", pinLabel(n)));
       return;
     }
     const old = this.defOf(this.model.roles[n]);
@@ -215,7 +216,7 @@ export class Workbench {
     const caps =
       (this.model.capsKnown && this.model.pwmCap(n) ? "P" : "") +
       (this.model.capsKnown && this.model.adcCap(n) ? "A" : "");
-    c.innerHTML = `<b>GP${n}</b>${caps ? `<span class="caps">${caps}</span>` : ""}`;
+    c.innerHTML = `<b>${pinLabel(n)}</b>${caps ? `<span class="caps">${caps}</span>` : ""}`;
     this.levelEls[n] = null;
     this.adcEls[n] = null;
     if (def) {
@@ -267,23 +268,23 @@ export class Workbench {
   private render(): void {
     this.poolEl.innerHTML = "";
     for (const z of this.zoneEls.values()) z.innerHTML = "";
-    this.levelEls = new Array(NUM).fill(null);
-    this.adcEls = new Array(NUM).fill(null);
-    for (let n = 0; n < NUM; n++) {
+    this.levelEls = new Array(SLOTS).fill(null);
+    this.adcEls = new Array(SLOTS).fill(null);
+    for (let n = 0; n < SLOTS; n++) {
       const def = this.defOf(this.model.roles[n]);
       (def ? this.zoneEls.get(def.role)! : this.poolEl).appendChild(this.mkChip(n, def));
     }
     this.markZones();
     if (Date.now() < this.hintLock) return;
     this.hintEl.textContent =
-      this.model.sel !== null ? tf("hint_sel", this.model.sel) : t("wb_help");
+      this.model.sel !== null ? tf("hint_sel", pinLabel(this.model.sel)) : t("wb_help");
     this.hintEl.className = "wb-hint" + (this.model.sel !== null ? " act" : "");
   }
 
   // Level changes only toggle classes on the elements defs registered via
   // ChipView.levelEl — rebuilding chips would destroy inputs mid-typing.
   private updateLeds(): void {
-    for (let n = 0; n < NUM; n++) {
+    for (let n = 0; n < SLOTS; n++) {
       const e = this.levelEls[n];
       if (!e) continue;
       e.classList.toggle("hi", !!this.model.level(n));
@@ -291,7 +292,7 @@ export class Workbench {
   }
 
   private updateAdc(): void {
-    for (let n = 0; n < NUM; n++) {
+    for (let n = 0; n < SLOTS; n++) {
       const e = this.adcEls[n];
       if (e) e.textContent = adcText(this.model, n);
     }

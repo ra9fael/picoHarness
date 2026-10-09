@@ -34,14 +34,28 @@ export class DigitalDriver {
     if (link.state !== "ready") return;
     this.busy = true;
     try {
-      const r = await link.sendCmd("gpio.cfg", model.cfgMasks());
-      if (r.ok) model.applyState(r.data, true);
-      else note(tf("gpio_cmd_fail", String(r.error)));
+      const masks = model.cfgMasks();
+      const r = await link.sendCmd("gpio.cfg", masks);
+      if (r.ok) {
+        model.applyState(r.data, true);
+        await this.subInputs(masks.in);
+      } else note(tf("gpio_cmd_fail", String(r.error)));
     } catch (e: any) {
       note(tf("gpio_apply_fail", e.message));
     } finally {
       this.busy = false;
     }
+  }
+
+  // Keep the firmware's gpio.in subscription aligned with the current input
+  // set: edges only flow for pins we actually watch, and re-subscribing pulls a
+  // retained snapshot so levels refresh without waiting for the next change.
+  private async subInputs(mask: number): Promise<void> {
+    const { link } = this.api;
+    try {
+      if (mask) await link.sendCmd("sub", { topic: "gpio.in", params: { mask } });
+      else await link.sendCmd("unsub", { topic: "gpio.in" });
+    } catch {}
   }
 
   async flipOut(n: number): Promise<void> {

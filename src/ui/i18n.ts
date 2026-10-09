@@ -75,6 +75,10 @@ const dict = {
     scope_cal: "校正",
     scope_fmt_bin: "struct 二进制",
     scope_info: "{0} sps · 窗口 {1}s",
+    scope_cross: "十字线",
+    scope_mode_roll: "连续滚动",
+    scope_mode_fifo: "FIFO",
+    scope_depth: "深度",
   },
   en: {
     subtitle: "USB CDC",
@@ -147,6 +151,10 @@ const dict = {
     scope_cal: "Cal",
     scope_fmt_bin: "struct binary",
     scope_info: "{0} sps · window {1}s",
+    scope_cross: "Crosshair",
+    scope_mode_roll: "Roll",
+    scope_mode_fifo: "FIFO",
+    scope_depth: "Depth",
   },
 };
 

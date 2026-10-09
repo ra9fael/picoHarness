@@ -8,6 +8,18 @@ import type { JsonMsg } from "../types";
 export const NUM = 29; // GP0..GP28, matching firmware NUM_PINS
 export const R_IN = 1, R_OUT = 2, R_PWM = 3, R_ADC = 4;
 
+// The on-die temperature sensor is a virtual ADC channel: it occupies one extra
+// model slot (index TEMP) but travels on the wire as pin TEMP_PIN, matching the
+// firmware. All roles/pulls/adcFmt/adcSmooth arrays are SLOTS long so the temp
+// channel flows through the same lane/chip/scope code as a GP pin.
+export const TEMP = 29; // internal slot index of the temperature channel
+export const SLOTS = 30; // NUM GP pins + the temp slot
+export const TEMP_PIN = 100; // wire id of the temperature channel
+
+export const toWire = (n: number): number => (n === TEMP ? TEMP_PIN : n);
+export const fromWire = (p: number): number => (p === TEMP_PIN ? TEMP : p);
+export const pinLabel = (n: number): string => (n === TEMP ? "TEMP" : "GP" + n);
+
 // EMA factor for the ADC chip readout: smooths the bursty deadband events into
 // a steady number. 0.3 tracks a real change within a few samples while killing
 // single-step jitter that otherwise makes the digits flicker every event.
@@ -20,13 +32,13 @@ export type PwmParam = { freq: number; duty: number };
 export const PWM_UNIT_AUTO = -9;
 
 export class PinModel extends Emitter {
-  roles = new Uint8Array(NUM); // 0 = pool, else R_*
-  pulls = new Uint8Array(NUM); // inputs: 0 up, 1 down, 2 none
-  pwm: (PwmParam | null)[] = new Array(NUM).fill(null);
-  pwmUnit = new Int8Array(NUM).fill(PWM_UNIT_AUTO); // display exponent; AUTO = follow freq
-  adcFmt = new Uint8Array(NUM); // ADC chip display: 0 volts, 1 millivolts, 2 raw 16-bit
-  devAdc: Record<number, number> = {}; // last raw reading per pin, from events
-  private adcSmooth = new Float64Array(NUM).fill(-1); // EMA of devAdc; -1 = unset
+  roles = new Uint8Array(SLOTS); // 0 = pool, else R_*
+  pulls = new Uint8Array(SLOTS); // inputs: 0 up, 1 down, 2 none
+  pwm: (PwmParam | null)[] = new Array(SLOTS).fill(null);
+  pwmUnit = new Int8Array(SLOTS).fill(PWM_UNIT_AUTO); // display exponent; AUTO = follow freq
+  adcFmt = new Uint8Array(SLOTS); // ADC chip display: 0 volts, 1 millivolts, 2 raw 16-bit
+  devAdc: Record<number, number> = {}; // last raw reading per internal slot, from events
+  private adcSmooth = new Float64Array(SLOTS).fill(-1); // EMA of devAdc; -1 = unset
   devIn = 0;
   devOut = 0;
   devPwm = 0;
@@ -50,11 +62,13 @@ export class PinModel extends Emitter {
   }
 
   pwmCap(n: number): boolean {
+    if (n === TEMP) return false; // the temperature sensor is not a PWM pin
     return !this.pwmCaps || this.pwmCaps.includes(n);
   }
 
   adcCap(n: number): boolean {
-    return !this.adcCaps || this.adcCaps.includes(n);
+    const w = toWire(n); // caps are reported as wire ids (temp = 100)
+    return !this.adcCaps || this.adcCaps.includes(w);
   }
 
   level(n: number): number {
@@ -91,6 +105,12 @@ export class PinModel extends Emitter {
     return m;
   }
 
+  // The temperature channel is reported by the firmware as a separate boolean
+  // (adc_temp), not a cfg_adc bit, since it is not a GP pin.
+  adcTempOn(): boolean {
+    return this.roles[TEMP] === R_ADC;
+  }
+
   // Edge-pushed input levels / ADC batches from firmware.
   applyEvent(m: JsonMsg): void {
     if (m.evt === "adc" && m.vals) {
@@ -108,9 +128,9 @@ export class PinModel extends Emitter {
   // while the scope is running.
   ingestAdc(vals: Record<number | string, number>): void {
     for (const k in vals) {
-      const n = Number(k);
+      const n = fromWire(Number(k)); // wire ids: temp arrives as 100
       const raw = vals[k];
-      if (!Number.isInteger(n) || n < 0 || n >= NUM || typeof raw !== "number") continue;
+      if (!Number.isInteger(n) || n < 0 || n >= SLOTS || typeof raw !== "number") continue;
       this.devAdc[n] = raw;
       const prev = this.adcSmooth[n];
       this.adcSmooth[n] = prev < 0 ? raw : prev + ADC_ALPHA * (raw - prev);
@@ -144,7 +164,8 @@ export class PinModel extends Emitter {
       d.cfg_in !== w.in || d.cfg_out !== w.out ||
       (d.cfg_pd >>> 0) !== w.pd || (d.cfg_pn >>> 0) !== w.pn;
     const pwmDrift = (d.cfg_pwm ?? 0) !== this.pwmMask();
-    const adcDrift = (d.cfg_adc ?? 0) !== this.adcMask();
+    const adcDrift =
+      (d.cfg_adc ?? 0) !== this.adcMask() || !!d.adc_temp !== this.adcTempOn();
     return { gpioDrift, pwmDrift, adcDrift };
   }
 }
