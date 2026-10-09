@@ -17,6 +17,7 @@ export type JsonMsg = {
   error?: string;
   data?: any;
   evt?: string;
+  in?: number; // gpio_in event: live input level bitmask
   caps?: { pwm?: number[]; adc?: number[] };
 };
 

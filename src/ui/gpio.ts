@@ -1,11 +1,11 @@
 // IO workbench (方案A): pin pool + function lanes (input / output / PWM).
 // Drag a GP chip into a lane, or click chip then lane; releases go back to
 // the pool. Each pin belongs to exactly one function; changes apply instantly.
-import type { SerialLink } from "./serial";
+import type { SerialLink, JsonMsg } from "./serial";
 import { t, tf, type MsgKey } from "./i18n";
 
 const NUM = 27;
-const POLL_MS = 200;
+const POLL_MS = 1000; // reconciliation only — live levels arrive via gpio_in events
 const R_IN = 1, R_OUT = 2, R_PWM = 3;
 
 const svg = (p: string) =>
@@ -101,6 +101,13 @@ export class GpioPanel {
   setCaps(caps: any) {
     this.pwmCaps = Array.isArray(caps?.pwm) ? caps.pwm.map(Number) : null;
     this.render();
+  }
+
+  // Edge-pushed input levels from firmware (asyncio gpio_monitor).
+  onEvent(m: JsonMsg) {
+    if (m.evt !== "gpio_in" || typeof m.in !== "number") return;
+    this.devIn = m.in >>> 0;
+    this.updateLeds();
   }
 
   get active() {
