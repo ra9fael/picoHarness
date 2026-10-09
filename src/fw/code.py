@@ -9,7 +9,9 @@
 # which pushes {"evt":"adc","vals":{pin:raw}} when any active channel moves
 # more than the deadband vs the last sent value, + adc_streamer, which (while
 # adc.stream is on, and keeping adc_monitor quiet) ships batched waveform
-# frames {"evt":"adc_w","pins":[...],"ms":dt,"v":[[...],...]}. Real-hardware
+# frames {"evt":"adc_w","pins":[...],"ms":dt,"v":[[...],...]} — or, with
+# adc.stream fmt="bin", the same batch as a compact 0xAA'W'-framed struct
+# payload written atomically to the CDC console (see send_bin). Real-hardware
 # lessons, in the order they bit us:
 # 1. sys.stdin.read(1) BLOCKS until at least one byte arrives — it is NOT the
 #    non-blocking idiom. A bare read(1) poll in command_reader froze the whole
@@ -29,6 +31,7 @@ import sys
 import select
 import time
 import json
+import struct
 import asyncio
 
 import board
@@ -36,15 +39,37 @@ import digitalio
 import analogio
 from pwmio import PWMOut
 
+try:
+    import usb_cdc
+except ImportError:  # no USB CDC console on this build — binary frames off
+    usb_cdc = None
+
 APP = "PicoHarness"
-VERSION = "0.1.4-adcstream"
+VERSION = "0.1.5-binstream"
 NUM_PINS = 29  # GP0..GP28: Pico-family boards expose up to GP28; on rp2040 GP27/28 are ADC1/ADC2
 
 MODE_UNUSED, MODE_IN, MODE_OUT = 0, 1, 2
 
 
 def send(obj):
-    print(json.dumps(obj))
+    # compact separators: no spaces after , and : — ~15% smaller on the wire
+    print(json.dumps(obj, separators=(",", ":")))
+
+
+# —— binary waveform frames (optional adc.stream fmt="bin") ——
+# Frame = 0xAA 'W' + u16le(payload_len) + payload. payload for the ADC
+# waveform kind (1) = struct "<BBHH"(kind, nch, ms, nrows) + u16le[nch] pins
+# + u16le[nrows*nch] samples (row-major, one row per sample instant).
+# The 0xAA magic never occurs in our ASCII text stream, so the host can
+# byte-scan for it and keep both formats interleaved on one CDC endpoint.
+# write() is atomic per call, so a frame never interleaves with a print line.
+BIN_MAGIC = b"\xaaW"
+
+
+def send_bin(payload):
+    if usb_cdc is None or usb_cdc.console is None:
+        raise RuntimeError("usb_cdc console unavailable")
+    usb_cdc.console.write(BIN_MAGIC + struct.pack("<H", len(payload)) + payload)
 
 
 def parse_req(line):
@@ -248,7 +273,7 @@ def adc_stop(pin):
 # While STREAM is active the deadband adc_monitor stays quiet and the
 # adc_streamer task ships whole batches instead: one event per batch keeps
 # the wire (and the browser) at ~1Hz no matter how many channels run.
-STREAM = None  # {"pins": tuple, "ms": int, "batch": int} | None
+STREAM = None  # {"pins": tuple, "ms": int, "batch": int, "fmt": "json"|"bin"} | None
 
 
 def adc_stream(args):
@@ -268,8 +293,13 @@ def adc_stream(args):
         raise ValueError("no pins given")
     ms = max(10, int(args.get("ms", 50)))
     batch = max(1, min(100, int(args.get("batch", 20))))
-    STREAM = {"pins": tuple(ps), "ms": ms, "batch": batch}
-    return {"ok": True, "data": {"stream": {"pins": ps, "ms": ms, "batch": batch}}}
+    fmt = args.get("fmt", "json")
+    if fmt not in ("json", "bin"):
+        raise ValueError("fmt must be json or bin")
+    if fmt == "bin" and (usb_cdc is None or usb_cdc.console is None):
+        raise ValueError("usb_cdc console unavailable for bin frames")
+    STREAM = {"pins": tuple(ps), "ms": ms, "batch": batch, "fmt": fmt}
+    return {"ok": True, "data": {"stream": {"pins": ps, "ms": ms, "batch": batch, "fmt": fmt}}}
 
 
 # —— capability probe ——
@@ -427,14 +457,12 @@ _stdin_poll.register(sys.stdin, select.POLLIN)
 async def command_reader():
     buf = ""
     while True:
-        got = False
         # poll(0) = "is a byte already waiting?" — without this gate read(1)
         # blocks here and no other task ever advances.
         while _stdin_poll.poll(0):
             ch = sys.stdin.read(1)
             if not ch:
                 break
-            got = True
             buf += ch
             if ch == "\n":
                 line = buf.strip()
@@ -445,7 +473,7 @@ async def command_reader():
                     dispatch(parse_req(line))
                 except ValueError:
                     send({"id": None, "ok": False, "error": "bad json"})
-        await asyncio.sleep(0.002 if got else 0.01)
+        await asyncio.sleep(0.002)
 
 
 async def gpio_monitor():
@@ -496,6 +524,21 @@ async def adc_monitor():
         await asyncio.sleep(0.1)
 
 
+def _emit_wave(s, rows):
+    # rows: list of per-instant channel readings (row-major), len == batch
+    if s["fmt"] == "bin":
+        pins = s["pins"]
+        nch = len(pins)
+        head = struct.pack("<BBHH", 1, nch, s["ms"], len(rows))
+        flat = []
+        for r in rows:
+            flat.extend(r)
+        body = struct.pack("<%dH" % len(flat), *flat)
+        send_bin(head + struct.pack("<%dH" % nch, *pins) + body)
+    else:
+        send({"evt": "adc_w", "pins": list(s["pins"]), "ms": s["ms"], "v": rows})
+
+
 async def adc_streamer():
     global STREAM
     buf = []
@@ -509,7 +552,7 @@ async def adc_streamer():
         try:
             buf.append([adc_obj[n].value for n in s["pins"]])
             if len(buf) >= s["batch"]:
-                send({"evt": "adc_w", "pins": list(s["pins"]), "ms": s["ms"], "v": buf})
+                _emit_wave(s, buf)
                 buf = []
         except Exception as e:
             send({"evt": "dbg", "task": "stream", "err": "%s: %s" % (type(e).__name__, e)})
