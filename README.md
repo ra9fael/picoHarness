@@ -31,12 +31,30 @@ uv venv -p 3.12 --seed -n .venv
 
 ## 协议
 
-每行一条 JSON。请求 `{"id":1,"cmd":"ping","args":{...}}`；应答 `{"id":1,"ok":true,"data":{...}}`；设备事件 `{"evt":"..."}`。启动时设备发 `{"evt":"ready",...}` 握手行（含 `caps` 引脚能力表：固件启动时对每脚试建 `PWMOut`/`AnalogIn` 探测得出，UI 不硬编码硬件兼容性），UI 连接时先发 Ctrl+C/Ctrl+D 复位程序再等待 ready。已实现命令：`ping`、`echo`、`gpio.cfg {in,out,pd,pn}`（增量方向/上下拉配置，PWM 占用的脚自动跳过）、`gpio.out {mask,vals}`（按位改写输出）、`gpio.state`（返回 `{in,out,cfg_in,cfg_out,cfg_pd,cfg_pn,cfg_pwm,pwm}` 位图）、`pwm.cfg {pin,freq,duty}`（duty 0..1，重复调用即改参）、`pwm.stop {pin}`。掩码位 = `1<<GPn`；输入上下拉三态：`pd` 位=下拉、`pn` 位=无、默认上拉。注意 rp2 硬件 PWM 按 slice 共享频率，同 slice 两脚频率互相覆盖。**IO 分配工作台**：顶部引脚池 + 数字输入/数字输出/PWM 三条功能泳道，拖动 GP 芯片入泳道或"点芯片再点泳道"即绑定（修改即时下发，无暂存按钮）；同一引脚只属一个功能，跨泳道自动顶位；拖回池中或点 × 释放；PWM 泳道仅接受能力表内的脚。因 CircuitPython 无 select/非阻塞 stdin，输入电平由 UI 以 200ms 轮询 `gpio.state` 获取（非设备主动推送）。界面支持中/英双语（头部 EN/中文 按钮，localStorage 持久化）。
+每行一条 JSON。请求 `{"id":1,"cmd":"ping","args":{...}}`；应答 `{"id":1,"ok":true,"data":{...}}`；设备事件 `{"evt":"..."}`（已实现：`gpio_in {in}` 输入电平边沿推送，固件 asyncio `gpio_monitor` 任务 50ms 采样、仅变化时发出）。启动时设备发 `{"evt":"ready",...}` 握手行（含 `caps` 引脚能力表：固件启动时对每脚试建 `PWMOut`/`AnalogIn` 探测得出，UI 不硬编码硬件兼容性），UI 连接时先发 Ctrl+C/Ctrl+D 复位程序再等待 ready。已实现命令：`ping`、`echo`、`gpio.cfg {in,out,pd,pn}`（增量方向/上下拉配置，PWM 占用的脚自动跳过）、`gpio.out {mask,vals}`（按位改写输出）、`gpio.state`（返回 `{in,out,cfg_in,cfg_out,cfg_pd,cfg_pn,cfg_pwm,pwm}` 位图）、`pwm.cfg {pin,freq,duty}`（duty 0..1，重复调用即改参）、`pwm.stop {pin}`。掩码位 = `1<<GPn`；输入上下拉三态：`pd` 位=下拉、`pn` 位=无、默认上拉。注意 rp2 硬件 PWM 按 slice 共享频率，同 slice 两脚频率互相覆盖。**IO 分配工作台**：顶部引脚池 + 数字输入/数字输出/PWM 三条功能泳道，拖动 GP 芯片入泳道或"点芯片再点泳道"即绑定（修改即时下发，无暂存按钮）；同一引脚只属一个功能（固件 `owner[]` 裁决表统一仲裁，claim/release），跨泳道自动顶位；拖回池中或点 × 释放；PWM 泳道仅接受能力表内的脚。输入电平实时性：事件驱动（`gpio_in` 边沿推送直达 UI），另有 1s `gpio.state` 对账轮询用于掉线/软复位后自愈。界面支持中/英双语（头部 EN/中文 按钮，localStorage 持久化）。
+
+## 架构
+
+固件（`src/fw/code.py`，单文件部署）：`COMMANDS` 分发表按 cmd 路由到各功能驱动（gpio / pwm）；`claim(n, who, force)` / `release(n)` 引脚所有权裁决是所有硬件操作的唯一入口，新增功能只需注册命令 + 实现自己的 claim 语义。主循环为 asyncio 任务组（`command_reader` 非阻塞读 stdin + `gpio_monitor` 边沿推送）。
+
+UI（`src/ui/`）分三层，依赖单向向下：
+
+```
+serial.ts        Session 门面：connect/握手/REPL/状态机（console.ts、main.ts 只认这层）
+├─ core/transport.ts  Layer1 字节管道：端口所有权、pump 自动重挂、行分帧、waitForText
+├─ core/rpc.ts        Layer2 JSON-lines 协议：sendCmd/应答配对、事件分发、ready 等待
+model/pins.ts    工作台唯一数据真源（roles/pulls/pwm/设备状态），"levels" 事件驱动定向刷 LED
+workbench/       引擎 + FunctionDef 注册表（digital.ts / pwm.ts）：
+                 泳道、拖拽规则、芯片视图、下发调度全部来自 def 插件；
+                 新增 I2C/SPI/ADC = 写一个 def(+driver) 模块并注册进 defs 数组
+core/events.ts   极简 Emitter，层间解耦
+```
 
 ## 路线图
 
 - [x] Spike：Web Serial + JSON lines 握手闭环
 - [x] GPIO：逐引脚方向/上下拉/输出实时配置，state 轮询
 - [x] IO 分配工作台 + PWM 简易信号源：引脚池 + 输入/输出/PWM 泳道，拖拽绑定，固件能力表
+- [x] 架构重构：固件 dispatch+裁决表、asyncio 事件推送；UI 三层（Transport/Rpc/Session）+ FunctionDef 插件化工作台
 - [ ] I2C / SPI / UART 泳道（含 REPL 占用 USB 的取舍）
 - [ ] config.json 持久化、错误面板
