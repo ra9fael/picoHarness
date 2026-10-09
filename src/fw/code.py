@@ -5,14 +5,18 @@
 # it and release(n) when done — the owner table is the single arbiter of pin
 # ownership, so functions can never fight over a pin implicitly.
 # Main loop is an asyncio task group: command_reader + gpio_monitor, which
-# pushes {"evt":"gpio_in","in":mask} on input level *edges*, + adc_monitor,
-# which pushes {"evt":"adc","vals":{pin:raw}} when any active channel moves
-# more than the deadband vs the last sent value, + adc_streamer, which (while
+# pushes {"evt":"gpio_in","in":mask} on input level *edges* but only while the
+# host is subscribed to topic "gpio.in" (see SUBS / cmd_sub — MQTT-style, with
+# a retained snapshot on subscribe), + adc_monitor, which pushes
+# {"evt":"adc","vals":{pin:raw}} when any configured channel moves more than
+# its (per-subscription overridable) deadband vs the last sent value, + adc_streamer, which (while
 # adc.stream is on, and keeping adc_monitor quiet) ships batched waveform
 # frames {"evt":"adc_w","pins":[...],"ms":dt,"v":[[...],...]} — or, with
 # adc.stream fmt="bin", the same batch as a compact 0xAA'W'-framed struct
-# payload written atomically to the CDC console (see send_bin). Real-hardware
-# lessons, in the order they bit us:
+# payload written atomically to the CDC console (see send_bin). The on-die
+# temperature sensor participates as virtual ADC channel 100 (TEMP_PIN) — same
+# claim/monitor/stream path as a GP channel, host-side converted to °C.
+# Real-hardware lessons, in the order they bit us:
 # 1. sys.stdin.read(1) BLOCKS until at least one byte arrives — it is NOT the
 #    non-blocking idiom. A bare read(1) poll in command_reader froze the whole
 #    loop and starved both monitors (binary-searched A-F on live hardware).
@@ -37,6 +41,7 @@ import asyncio
 import board
 import digitalio
 import analogio
+import microcontroller
 from pwmio import PWMOut
 
 try:
@@ -45,8 +50,19 @@ except ImportError:  # no USB CDC console on this build — binary frames off
     usb_cdc = None
 
 APP = "PicoHarness"
-VERSION = "0.1.5-binstream"
+VERSION = "0.1.6-temp-sub"
 NUM_PINS = 29  # GP0..GP28: Pico-family boards expose up to GP28; on rp2040 GP27/28 are ADC1/ADC2
+
+# Virtual ADC channel id for the on-die temperature sensor. It is not a GP pin,
+# so it lives outside the owner[] arbiter (tracked by the temp_on flag) and is
+# addressed on the wire as pin 100. This build (rp2350 Pico 2, CP 10.3.1) does
+# NOT expose board.TEMPERATURE_SENSOR, but microcontroller.cpu.temperature
+# reports °C directly; _temp_raw16() inverts the datasheet curve to emit the
+# 16-bit ADC code the sensor would have produced, so the temperature channel
+# rides the exact same raw u16 pipeline as a GP channel. The host recovers °C
+# via its per-channel k·x+b calibration (forward: V = raw16 * 3.3 / 65535,
+# °C = 27 - (V - 0.706) / 0.001721).
+TEMP_PIN = 100
 
 MODE_UNUSED, MODE_IN, MODE_OUT = 0, 1, 2
 
@@ -245,16 +261,47 @@ def pwm_stop(pin):
 
 # —— ADC driver ——
 adc_obj = [None] * NUM_PINS
+temp_on = False  # True while the virtual temperature channel (TEMP_PIN) is claimed
+
+
+def _temp_raw16():
+    # board.TEMPERATURE_SENSOR is not exposed on this build (rp2350 Pico 2,
+    # CircuitPython 10.3.1), but microcontroller.cpu.temperature reports °C
+    # directly. Invert the datasheet curve to synthesize the 16-bit ADC code the
+    # internal sensor would have produced, so the temperature channel rides the
+    # exact same raw u16 pipeline as a GP channel; the host recovers °C with its
+    # per-channel k·x+b calibration. Forward: V = raw*3.3/65535,
+    # °C = 27 - (V - 0.706)/0.001721. Inverse below (0.03 °C/LSB, plenty).
+    t = microcontroller.cpu.temperature
+    v = 0.706 - (t - 27.0) * 0.001721
+    return max(0, min(65535, int(v / 3.3 * 65535.0 + 0.5)))
+
+
+def _adc_configured(n):
+    return temp_on if n == TEMP_PIN else (adc_obj[n] is not None)
+
+
+def _adc_val(n):
+    return _temp_raw16() if n == TEMP_PIN else adc_obj[n].value
 
 
 def adc_release(n):
+    global temp_on
+    if n == TEMP_PIN:
+        temp_on = False
+        return
     if adc_obj[n]:
         adc_obj[n].deinit()
         adc_obj[n] = None
 
 
 def adc_start(pin):
+    global temp_on
     n = int(pin)
+    if n == TEMP_PIN:
+        _ = microcontroller.cpu.temperature  # probe: raises if unsupported
+        temp_on = True
+        return
     if not 0 <= n < NUM_PINS:
         raise ValueError("pin out of range")
     if not claim(n, "adc", force=True):  # steals gpio pins, like pwm does
@@ -265,7 +312,9 @@ def adc_start(pin):
 
 def adc_stop(pin):
     n = int(pin)
-    if owner[n] == "adc":
+    if n == TEMP_PIN:
+        adc_release(TEMP_PIN)
+    elif owner[n] == "adc":
         release(n)
 
 
@@ -284,10 +333,12 @@ def adc_stream(args):
     ps = []
     for p in args.get("pins") or []:
         n = int(p)
-        if not 0 <= n < NUM_PINS:
+        if n != TEMP_PIN and not 0 <= n < NUM_PINS:
             raise ValueError("pin out of range")
-        if adc_obj[n] is None:
-            raise ValueError("adc not configured on GP%d" % n)
+        if not _adc_configured(n):
+            raise ValueError(
+                "adc not configured on %s" % ("TEMP" if n == TEMP_PIN else "GP%d" % n)
+            )
         ps.append(n)
     if not ps:
         raise ValueError("no pins given")
@@ -300,6 +351,73 @@ def adc_stream(args):
         raise ValueError("usb_cdc console unavailable for bin frames")
     STREAM = {"pins": tuple(ps), "ms": ms, "batch": batch, "fmt": fmt}
     return {"ok": True, "data": {"stream": {"pins": ps, "ms": ms, "batch": batch, "fmt": fmt}}}
+
+
+# —— event subscriptions (MQTT-style sub/unsub + retained) ——
+# A topic only emits while it is subscribed; unsubscribed topics stay silent so
+# the wire carries just what the host asked for. Subscribing immediately
+# replays one "retained" snapshot, so the host never waits for the next edge.
+#   gpio.in   params {mask:int = all inputs, min_ms:int = 0}
+#   adc.<n>   params {deadband:int = ADC_DEADBAND}   (n = wire pin, 100 = temp)
+SUBS = {}
+
+
+def _adc_topic_pin(topic):
+    # "adc.<wirepin>" -> int pin, or None for any other topic
+    if not topic.startswith("adc."):
+        return None
+    try:
+        return int(topic[4:])
+    except ValueError:
+        return None
+
+
+def _adc_val_of(n):
+    # bounds-safe raw reading for an arbitrary wire pin from a subscription,
+    # or None if the pin is out of range / not configured
+    if n == TEMP_PIN or 0 <= n < NUM_PINS:
+        if _adc_configured(n):
+            return _adc_val(n)
+    return None
+
+
+def _gpio_in_masked():
+    sub = SUBS.get("gpio.in") or {}
+    cur = read_inputs()
+    mask = sub.get("mask")
+    if isinstance(mask, int):
+        cur &= mask
+    return cur
+
+
+def _emit_retained(topic):
+    if topic == "gpio.in":
+        if in_idx:
+            send({"evt": "gpio_in", "in": _gpio_in_masked(), "retained": True})
+        return
+    n = _adc_topic_pin(topic)
+    if n is None:
+        return
+    v = _adc_val_of(n)
+    if v is not None:
+        send({"evt": "adc", "vals": {str(n): v}, "retained": True})
+
+
+def cmd_sub(args):
+    topic = args.get("topic")
+    if not isinstance(topic, str) or not topic:
+        raise ValueError("topic required")
+    params = args.get("params")
+    SUBS[topic] = params if isinstance(params, dict) else {}
+    _emit_retained(topic)
+    return {"ok": True, "data": {"sub": topic}}
+
+
+def cmd_unsub(args):
+    topic = args.get("topic")
+    if topic in SUBS:
+        del SUBS[topic]
+    return {"ok": True, "data": {"unsub": topic}}
 
 
 # —— capability probe ——
@@ -321,6 +439,11 @@ def probe_caps():
             caps["adc"].append(n)
         except ValueError:
             pass
+    try:
+        _ = microcontroller.cpu.temperature
+        caps["adc"].append(TEMP_PIN)
+    except Exception:
+        pass
     return caps
 
 
@@ -359,6 +482,7 @@ def read_state():
         "cfg_pn": pn,
         "cfg_pwm": pwm_m,
         "cfg_adc": adc_m,
+        "adc_temp": 1 if temp_on else 0,
         "pwm": pw,
     }
 
@@ -421,6 +545,8 @@ COMMANDS = {
     "adc.cfg": cmd_adc_cfg,
     "adc.stop": cmd_adc_stop,
     "adc.stream": adc_stream,
+    "sub": cmd_sub,
+    "unsub": cmd_unsub,
 }
 
 
@@ -479,22 +605,41 @@ async def command_reader():
 async def gpio_monitor():
     last = None
     alive = False
+    next_ms = 0
     while True:
         try:
             if not alive:
                 alive = True
                 send({"evt": "dbg", "task": "gpio", "alive": True})
-            if in_idx:
-                cur = read_inputs()
-                if cur != last:
+            # Only push while gpio.in is subscribed; the host still catches up
+            # via the 1 s gpio.state poll if a subscription is ever missed.
+            if in_idx and "gpio.in" in SUBS:
+                sub = SUBS["gpio.in"]
+                cur = _gpio_in_masked()
+                now = time.monotonic() * 1000
+                if cur != last and now >= next_ms:
                     send({"evt": "gpio_in", "in": cur})
                     last = cur
+                    next_ms = now + int(sub.get("min_ms", 0))
         except Exception as e:  # never let a task die silently under gather
             send({"evt": "dbg", "task": "gpio", "err": "%s: %s" % (type(e).__name__, e)})
         await asyncio.sleep(0.05)
 
 
 ADC_DEADBAND = 328  # ~0.5% of the 16-bit span; keeps noise off the wire
+
+
+def _adc_deadband(n):
+    # A subscription to "adc.<n>" may override the deadband for that channel;
+    # otherwise the global default applies. ADC has no poll fallback, so the
+    # monitor always reports configured channels — the subscription only tunes
+    # sensitivity (and delivers the retained snapshot on sub).
+    sub = SUBS.get("adc.%d" % n)
+    if isinstance(sub, dict):
+        db = sub.get("deadband")
+        if isinstance(db, int) and db >= 0:
+            return db
+    return ADC_DEADBAND
 
 
 async def adc_monitor():
@@ -507,12 +652,17 @@ async def adc_monitor():
                 send({"evt": "dbg", "task": "adc", "alive": True})
             if STREAM is None:
                 vals = {}
+                dbs = {}
                 for n in range(NUM_PINS):
                     if adc_obj[n] is not None:
                         vals[str(n)] = adc_obj[n].value
+                        dbs[str(n)] = _adc_deadband(n)
+                if temp_on:
+                    vals[str(TEMP_PIN)] = _temp_raw16()
+                    dbs[str(TEMP_PIN)] = _adc_deadband(TEMP_PIN)
                 if vals:
-                    moved = len(vals) != len(sent) or any(
-                        abs(v - sent.get(k, -98304)) > ADC_DEADBAND for k, v in vals.items()
+                    moved = set(vals) != set(sent) or any(
+                        abs(v - sent.get(k, -98304)) > dbs[k] for k, v in vals.items()
                     )
                     if moved:
                         send({"evt": "adc", "vals": vals})
@@ -550,7 +700,7 @@ async def adc_streamer():
             continue
         t0 = time.monotonic()
         try:
-            buf.append([adc_obj[n].value for n in s["pins"]])
+            buf.append([_adc_val(n) for n in s["pins"]])
             if len(buf) >= s["batch"]:
                 _emit_wave(s, buf)
                 buf = []
