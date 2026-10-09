@@ -32,7 +32,7 @@ uv venv -p 3.12 --seed -n .venv
 
 ## 协议
 
-每行一条 JSON。请求 `{"id":1,"cmd":"ping","args":{...}}`；应答 `{"id":1,"ok":true,"data":{...}}`；设备事件 `{"evt":"..."}`（已实现：`gpio_in {in}` 输入电平边沿推送，固件 asyncio `gpio_monitor` 任务 50ms 采样、仅变化时发出）。启动时设备发 `{"evt":"ready",...}` 握手行（含 `caps` 引脚能力表：固件启动时对每脚试建 `PWMOut`/`AnalogIn` 探测得出，UI 不硬编码硬件兼容性），UI 连接时先发 Ctrl+C/Ctrl+D 复位程序再等待 ready。已实现命令：`ping`、`echo`、`gpio.cfg {in,out,pd,pn}`（增量方向/上下拉配置，PWM 占用的脚自动跳过）、`gpio.out {mask,vals}`（按位改写输出）、`gpio.state`（返回 `{in,out,cfg_in,cfg_out,cfg_pd,cfg_pn,cfg_pwm,pwm}` 位图）、`pwm.cfg {pin,freq,duty}`（duty 0..1，重复调用即改参）、`pwm.stop {pin}`。掩码位 = `1<<GPn`；输入上下拉三态：`pd` 位=下拉、`pn` 位=无、默认上拉。注意 rp2 硬件 PWM 按 slice 共享频率，同 slice 两脚频率互相覆盖。**IO 分配工作台**：顶部引脚池 + 数字输入/数字输出/PWM 三条功能泳道，拖动 GP 芯片入泳道或"点芯片再点泳道"即绑定（修改即时下发，无暂存按钮）；同一引脚只属一个功能（固件 `owner[]` 裁决表统一仲裁，claim/release），跨泳道自动顶位；拖回池中或点 × 释放；PWM 泳道仅接受能力表内的脚。输入电平实时性：事件驱动（`gpio_in` 边沿推送直达 UI），另有 1s `gpio.state` 对账轮询用于掉线/软复位后自愈。界面支持中/英双语（头部 EN/中文 按钮，localStorage 持久化）。
+每行一条 JSON。请求 `{"id":1,"cmd":"ping","args":{...}}`；应答 `{"id":1,"ok":true,"data":{...}}`；设备事件 `{"evt":"..."}`（已实现：`gpio_in {in}` 输入电平边沿推送，固件 asyncio `gpio_monitor` 任务 50ms 采样、仅变化时发出）。启动时设备发 `{"evt":"ready",...}` 握手行（含 `caps` 引脚能力表：固件启动时对每脚试建 `PWMOut`/`AnalogIn` 探测得出，UI 不硬编码硬件兼容性），UI 连接时先发 Ctrl+C/Ctrl+D 复位程序再等待 ready。已实现命令：`ping`、`echo`、`gpio.cfg {in,out,pd,pn}`（增量方向/上下拉配置，PWM 占用的脚自动跳过）、`gpio.out {mask,vals}`（按位改写输出）、`gpio.state`（返回 `{in,out,cfg_in,cfg_out,cfg_pd,cfg_pn,cfg_pwm,pwm}` 位图）、`pwm.cfg {pin,freq,duty}`（duty 0..1，重复调用即改参）、`pwm.stop {pin}`。掩码位 = `1<<GPn`；输入上下拉三态：`pd` 位=下拉、`pn` 位=无、默认上拉。注意 rp2 硬件 PWM 按 slice 共享频率，同 slice 两脚频率互相覆盖。**IO 分配工作台**：顶部引脚池 + 数字输入/数字输出/PWM 三条功能泳道，拖动 GP 芯片入泳道或"点芯片再点泳道"即绑定（修改即时下发，无暂存按钮）；同一引脚只属一个功能（固件 `owner[]` 裁决表统一仲裁，claim/release），跨泳道自动顶位；拖回池中或点 × 释放；PWM 泳道仅接受能力表内的脚，频率可用预设下拉（1Hz–30MHz）或"数值+单位（Hz/kHz/MHz）"分离输入。工作台配置（绑定/上下拉/PWM 参数）持久化在浏览器 localStorage，重开页面自动恢复并随连接下发。输入电平实时性：事件驱动（`gpio_in` 边沿推送直达 UI），另有 1s `gpio.state` 对账轮询用于掉线/软复位后自愈。界面支持中/英双语（头部 EN/中文 按钮，localStorage 持久化）。
 
 ## 架构
 
@@ -57,5 +57,7 @@ core/events.ts   极简 Emitter，层间解耦
 - [x] GPIO：逐引脚方向/上下拉/输出实时配置，state 轮询
 - [x] IO 分配工作台 + PWM 简易信号源：引脚池 + 输入/输出/PWM 泳道，拖拽绑定，固件能力表
 - [x] 架构重构：固件 dispatch+裁决表、asyncio 事件推送；UI 三层（Transport/Rpc/Session）+ FunctionDef 插件化工作台
+- [x] PWM 频率预设下拉 + 数值/单位分离编辑；控制台日志复制/导出
+- [x] 工作台配置持久化（浏览器 localStorage，静默恢复；连接后经 gpio.cfg/PWM 对账自动下发到设备）
 - [ ] I2C / SPI / UART 泳道（含 REPL 占用 USB 的取舍）
-- [ ] config.json 持久化、错误面板
+- [ ] 设备端 config.json 开机自恢复（本轮只做了浏览器侧持久化）、错误面板
