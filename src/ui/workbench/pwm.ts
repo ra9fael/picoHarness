@@ -1,9 +1,11 @@
-// PWM function lane: per-pin freq/duty editors. One number box (with 1..1000
-// presets as datalist suggestions) × one unit pick (mHz/Hz/kHz/MHz). Sub-1 Hz
-// values are entered freely; the device answers honestly (rp2 PWMOut only
-// takes whole hertz, floor ~7.4 Hz). rp2 slices share frequency, so batching
-// across pins would be wrong anyway — each pin has its own debounce timer;
-// release stops the output immediately.
+// PWM function lane: per-pin freq/duty editors. One number box + a caret
+// that opens the full 1..1000 preset grid (a datalist was tried and rejected:
+// browsers filter suggestions by the current value, so typing 50 only shows
+// 50/500) × one unit pick (mHz/Hz/kHz/MHz). Sub-1 Hz values are entered
+// freely; the device answers honestly (rp2 PWMOut only takes whole hertz,
+// floor ~7.4 Hz). rp2 slices share frequency, so batching across pins would
+// be wrong anyway — each pin has its own debounce timer; release stops the
+// output immediately.
 import { tf } from "../i18n";
 import { NUM, R_PWM, PWM_UNIT_AUTO, type PwmParam } from "../model/pins";
 import { el, clamp } from "./dom";
@@ -80,29 +82,33 @@ function selOpt(value: string, label: string): HTMLOptionElement {
   return o;
 }
 
-function presetDatalist(): HTMLElement {
-  const existing = document.getElementById("pwm-mant-presets");
-  if (existing) return existing;
-  const dl = document.createElement("datalist");
-  dl.id = "pwm-mant-presets";
-  for (const v of PRESETS) {
-    const o = document.createElement("option");
-    o.value = String(v);
-    dl.appendChild(o);
-  }
-  document.body.appendChild(dl);
-  return dl;
-}
+// Only one preset grid may float at a time; chip click handlers call
+// stopPropagation, so this closes via the capture phase, before any bubble
+// handler can swallow the click.
+let openFreqWrap: HTMLElement | null = null;
+document.addEventListener(
+  "click",
+  (e) => {
+    if (openFreqWrap && !openFreqWrap.contains(e.target as Node)) {
+      openFreqWrap.classList.remove("open");
+      openFreqWrap = null;
+    }
+  },
+  true
+);
 
 function makeFreqCtl(api: FuncApi, n: number, p: PwmParam): HTMLElement[] {
   const model = api.model;
+  const wrap = el("pwm-freq", "span");
   const mant = el("pwm-in", "input") as HTMLInputElement;
+  const caret = el("pwm-caret", "button") as HTMLButtonElement;
+  const panel = el("pwm-presets", "div");
   const unit = el("pwm-sel", "select") as HTMLSelectElement;
   for (const u of UNITS) unit.appendChild(selOpt(String(u.exp), u.label));
   mant.type = "number";
   mant.min = "0.01";
   mant.step = "0.01";
-  mant.setAttribute("list", presetDatalist().id); // presets merge into the number box: click its arrow to pick 1..1000, or type
+  caret.textContent = "▾";
   // AUTO sentinel = "follow the frequency"; any real exponent (-3..6) is an explicit pick.
   const exp = () => (model.pwmUnit[n] === PWM_UNIT_AUTO ? autoExp(p.freq) : model.pwmUnit[n]);
   const show = () => {
@@ -110,6 +116,36 @@ function makeFreqCtl(api: FuncApi, n: number, p: PwmParam): HTMLElement[] {
     unit.value = String(exp());
   };
   show();
+  const close = () => {
+    wrap.classList.remove("open");
+    if (openFreqWrap === wrap) openFreqWrap = null;
+  };
+  const apply = () => {
+    p.freq = norm(clamp((+mant.value || 0) * 10 ** exp(), 0.001, FREQ_MAX));
+    show();
+    model.changed();
+    api.schedulePwm(n);
+  };
+  for (const v of PRESETS) {
+    const b = el("pwm-preset", "button") as HTMLButtonElement;
+    b.textContent = String(v);
+    b.addEventListener("click", (ev) => {
+      ev.stopPropagation();
+      mant.value = String(v);
+      apply();
+      close();
+    });
+    panel.appendChild(b);
+  }
+  caret.addEventListener("click", (ev) => {
+    ev.stopPropagation();
+    if (wrap.classList.contains("open")) close();
+    else {
+      if (openFreqWrap) openFreqWrap.classList.remove("open");
+      openFreqWrap = wrap;
+      wrap.classList.add("open");
+    }
+  });
   for (const e of [mant, unit]) e.addEventListener("click", (ev) => ev.stopPropagation());
   unit.addEventListener("change", () => {
     const m = parseFloat(mant.value) || p.freq / 10 ** exp();
@@ -119,13 +155,9 @@ function makeFreqCtl(api: FuncApi, n: number, p: PwmParam): HTMLElement[] {
     model.changed();
     api.schedulePwm(n);
   });
-  mant.addEventListener("change", () => {
-    p.freq = norm(clamp((+mant.value || 0) * 10 ** exp(), 0.001, FREQ_MAX));
-    show();
-    model.changed();
-    api.schedulePwm(n);
-  });
-  return [mant, unit];
+  mant.addEventListener("change", apply);
+  wrap.append(mant, caret, panel);
+  return [wrap, unit];
 }
 
 function dutyIn(api: FuncApi, n: number, p: PwmParam): HTMLElement {

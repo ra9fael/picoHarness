@@ -124,7 +124,7 @@ main { padding: 16px; }
 .chip .rel { border: 0; background: none; color: var(--dim); font-size: 13px; padding: 0 2px; line-height: 1; }
 .chip .rel:hover { color: var(--err); background: none; }
 .chip .pwm-in {
-  width: 54px;
+  width: 64px;
   background: #10161b;
   border: 1px solid var(--border);
   color: var(--fg);
@@ -132,6 +132,7 @@ main { padding: 16px; }
   padding: 1px 4px;
 }
 .chip .pwm-sel {
+  width: 62px;
   background: #10161b;
   border: 1px solid var(--border);
   color: var(--fg);
@@ -139,9 +140,56 @@ main { padding: 16px; }
   padding: 1px 2px;
   border-radius: 0;
 }
+.pwm-freq { position: relative; display: inline-flex; align-items: center; gap: 2px; }
+.pwm-caret {
+  background: none;
+  border: 1px solid var(--border);
+  color: var(--dim);
+  font: 10px var(--mono);
+  padding: 1px 4px;
+}
+.pwm-caret:hover { color: var(--accent); border-color: var(--accent); }
+.pwm-presets {
+  display: none;
+  position: absolute;
+  top: calc(100% + 2px);
+  left: 0;
+  z-index: 30;
+  grid-template-columns: repeat(5, auto);
+  gap: 2px;
+  background: var(--panel);
+  border: 1px solid var(--accent);
+  padding: 4px;
+}
+.pwm-freq.open .pwm-presets { display: grid; }
+.pwm-presets button { padding: 2px 6px; font: 11px var(--mono); }
 .chip .unit { font: 10px var(--mono); color: var(--dim); }
 .chip .adc-val { min-width: 52px; font: 11px var(--mono); color: var(--c-adc); text-align: right; }
 #gpio.idle .wb-zone { pointer-events: none; opacity: 0.55; }
+#scope {
+  border: 1px solid var(--border);
+  background: var(--panel);
+  margin-bottom: 16px;
+}
+.scope-bar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 10px;
+  border-bottom: 1px solid var(--border);
+  font: 12px var(--mono);
+}
+.scope-bar .label { color: var(--dim); }
+.scope-bar button { padding: 3px 10px; font-size: 12px; }
+.scope-chans { display: flex; gap: 4px; flex-wrap: wrap; }
+.scope-chan { background: none; border: 1px solid var(--border); color: var(--dim); padding: 1px 8px; font-size: 11px; }
+.scope-chan.on.c0 { background: #c8a2d0; border-color: #c8a2d0; color: #14101a; }
+.scope-chan.on.c1 { background: #4fd0c0; border-color: #4fd0c0; color: #06231f; }
+.scope-chan.on.c2 { background: #e5c07b; border-color: #e5c07b; color: #241a08; }
+.scope-chan.on.c3 { background: #7fb2d4; border-color: #7fb2d4; color: #0a1622; }
+.scope-body { height: 220px; position: relative; }
+.scope-body.hide { display: none; }
+.scope-canvas { position: absolute; inset: 0; width: 100%; height: 100%; }
 #console-dock {
   border: 1px solid var(--border);
   background: #0b0e11;
