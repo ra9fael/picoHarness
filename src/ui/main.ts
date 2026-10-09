@@ -132,6 +132,20 @@ btnLang.addEventListener("click", () => {
 
 $("btn-clear").addEventListener("click", () => consolePanel.clear());
 
+$("btn-copy").addEventListener("click", async () => {
+  try {
+    const text = await consolePanel.copyAll();
+    consolePanel.note(tf("log_copied", text.split("\n").length - 1));
+  } catch (e: any) {
+    consolePanel.note(tf("log_copy_fail", e.message));
+  }
+});
+
+$("btn-export").addEventListener("click", () => {
+  const { name } = consolePanel.exportFile();
+  consolePanel.note(tf("log_exported", name));
+});
+
 btnCollapse.addEventListener("click", () => {
   const dock = $("console-dock");
   dock.classList.toggle("collapsed");

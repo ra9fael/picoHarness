@@ -155,3 +155,12 @@ main { padding: 16px; }
 #mode-tag.repl { color: var(--warn); border-color: var(--warn); }
 #console-dock.collapsed #term { display: none; }
 #term { height: 300px; padding: 6px; }
+
+// off-screen anchor for the legacy clipboard fallback
+.copy-sink {
+  position: fixed;
+  left: -9999px;
+  top: 0;
+  opacity: 0;
+  pointer-events: none;
+}

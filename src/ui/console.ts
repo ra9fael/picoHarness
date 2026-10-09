@@ -89,6 +89,50 @@ export class ConsolePanel {
     this.term.clear();
   }
 
+  // Plain-text dump of the visible scrollback, ANSI stripped.
+  private bufferText(): string {
+    const b = this.term.buffer.active;
+    const lines: string[] = [];
+    for (let i = 0; i < b.length; i++) {
+      lines.push(b.getLine(i)?.translateToString(true) ?? "");
+    }
+    while (lines.length && lines[lines.length - 1] === "") lines.pop();
+    return lines.join("\n") + "\n";
+  }
+
+  async copyAll(): Promise<string> {
+    const text = this.bufferText();
+    try {
+      await navigator.clipboard.writeText(text);
+    } catch {
+      // file:// origins can deny the async API; legacy copy still works
+      // from a user gesture.
+      const ta = document.createElement("textarea");
+      ta.value = text;
+      ta.className = "copy-sink";
+      document.body.appendChild(ta);
+      ta.select();
+      document.execCommand("copy");
+      ta.remove();
+    }
+    return text;
+  }
+
+  exportFile(): { name: string; lines: number } {
+    const text = this.bufferText();
+    const d = new Date();
+    const p = (n: number) => String(n).padStart(2, "0");
+    const name = `picoharness-log-${d.getFullYear()}${p(d.getMonth() + 1)}${p(
+      d.getDate()
+    )}-${p(d.getHours())}${p(d.getMinutes())}${p(d.getSeconds())}.txt`;
+    const a = document.createElement("a");
+    a.href = URL.createObjectURL(new Blob([text], { type: "text/plain;charset=utf-8" }));
+    a.download = name;
+    a.click();
+    setTimeout(() => URL.revokeObjectURL(a.href), 5000);
+    return { name, lines: text.split("\n").length - 1 };
+  }
+
   note(msg: string) {
     this.term.writeln(C.sys + msg + C.reset);
   }
