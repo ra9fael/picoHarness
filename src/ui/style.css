@@ -18,6 +18,7 @@
   --c-out: #8fcf9a;
   --c-pwm: #e5c07b;
   --c-adc: #c8a2d0;
+  --c-i2c: #4fd0c0;
 }
 * { box-sizing: border-box; border-radius: 0; }
 body {
@@ -95,6 +96,7 @@ main { padding: 16px; }
 .wb-lane.l-out .wb-lane-head { color: var(--c-out); }
 .wb-lane.l-pwm .wb-lane-head { color: var(--c-pwm); }
 .wb-lane.l-adc .wb-lane-head { color: var(--c-adc); }
+.wb-lane.l-i2c .wb-lane-head { color: var(--c-i2c); }
 .chip {
   display: inline-flex;
   align-items: center;
@@ -172,6 +174,74 @@ main { padding: 16px; }
   text-align: right;
 }
 #gpio.idle .wb-zone { pointer-events: none; opacity: 0.55; }
+#gpio.idle .wb-buszone { pointer-events: none; opacity: 0.55; }
+#gpio.idle .i2c-card * { pointer-events: none; }
+.i2c-card {
+  border: 1px solid var(--border);
+  background: #161c22;
+  padding: 6px;
+  margin-bottom: 8px;
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+}
+.i2c-card.ready { border-color: var(--c-i2c); }
+.i2c-head { display: flex; align-items: center; gap: 6px; color: var(--c-i2c); }
+.i2c-head svg { width: 16px; height: 16px; }
+.i2c-title { font: 600 12px var(--mono); letter-spacing: 1px; }
+.i2c-head .rel { margin-left: auto; }
+.i2c-slots { display: grid; grid-template-columns: 1fr 1fr; gap: 5px; }
+.i2c-slot {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  border: 1px dashed var(--border);
+  background: #10161b;
+  padding: 3px 6px;
+  font: 11px var(--mono);
+}
+.i2c-slot.filled { border-style: solid; border-color: var(--c-i2c); }
+.i2c-slot.compat {
+  border-style: solid;
+  border-color: var(--c-i2c);
+  background: #12211f;
+  cursor: copy;
+}
+.i2c-slot.compat .i2c-slot-val { color: var(--c-i2c); }
+.i2c-slot-tag { color: var(--dim); letter-spacing: 1px; }
+.i2c-slot-val { color: var(--fg); cursor: pointer; }
+.i2c-slot.filled .i2c-slot-val:hover { color: var(--err); }
+.i2c-row { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
+.i2c-lbl { font: 10px var(--mono); color: var(--dim); letter-spacing: 1px; }
+.i2c-sel, .i2c-addr, .i2c-hex, .i2c-len {
+  background: #10161b;
+  border: 1px solid var(--border);
+  color: var(--fg);
+  font: 11px var(--mono);
+  padding: 2px 5px;
+}
+.i2c-addr { width: 64px; }
+.i2c-hex { width: 120px; flex: 1; min-width: 60px; }
+.i2c-len { width: 48px; }
+.i2c-out {
+  font: 11px var(--mono);
+  color: var(--c-i2c);
+  background: #10161b;
+  border: 1px solid var(--border);
+  padding: 3px 6px;
+  min-height: 20px;
+  word-break: break-all;
+}
+.i2c-add {
+  width: 100%;
+  border: 1px dashed var(--border);
+  background: none;
+  color: var(--dim);
+  font: 11px var(--mono);
+  padding: 4px;
+  cursor: pointer;
+}
+.i2c-add:hover { color: var(--c-i2c); border-color: var(--c-i2c); }
 #scope {
   border: 1px solid var(--border);
   background: var(--panel);

@@ -42,6 +42,7 @@ import board
 import digitalio
 import analogio
 import microcontroller
+import busio
 from pwmio import PWMOut
 
 try:
@@ -50,7 +51,7 @@ except ImportError:  # no USB CDC console on this build — binary frames off
     usb_cdc = None
 
 APP = "PicoHarness"
-VERSION = "0.1.6-temp-sub"
+VERSION = "0.1.7-i2c"
 NUM_PINS = 29  # GP0..GP28: Pico-family boards expose up to GP28; on rp2040 GP27/28 are ADC1/ADC2
 
 # Virtual ADC channel id for the on-die temperature sensor. It is not a GP pin,
@@ -129,6 +130,8 @@ def release(n):
         pwm_release(n)
     elif o == "adc":
         adc_release(n)
+    elif o == "i2c":
+        i2c_release(n)
     owner[n] = None
 
 
@@ -172,7 +175,7 @@ def apply_cfg(in_mask, out_mask, pd_mask=0, pn_mask=0):
     # Pull: DOWN if pd bit, NONE if pn bit, else UP.
     global out_bits
     for n in range(NUM_PINS):
-        if owner[n] in ("pwm", "adc"):
+        if owner[n] in ("pwm", "adc", "i2c"):
             continue  # other drivers own this pin; host must stop them first
         want = MODE_OUT if (out_mask >> n) & 1 else (MODE_IN if (in_mask >> n) & 1 else MODE_UNUSED)
         if want == MODE_UNUSED:
@@ -318,6 +321,143 @@ def adc_stop(pin):
         release(n)
 
 
+# —— I2C bus driver ——
+# Unlike gpio/pwm/adc (one owner per pin), an I2C bus owns a PAIR of pins, so it
+# lives in its own table keyed by a host-assigned bus id and registers both
+# members in owner[] under "i2c". Releasing either pin tears the whole bus down.
+# rp2 PIO I2C only accepts certain pin pairs (real-hardware: GP8/GP10 was
+# rejected with "Invalid pins"), so probe_caps().i2c lists the pins that can be
+# in at least one valid bus; the host greys the rest. Final legality is still
+# decided when the object is constructed and reported back.
+i2c_bus = {}  # id -> {"obj": I2C, "sda": n, "scl": m, "freq": hz}
+
+
+def _i2c_bus_on(n):
+    for bid, b in i2c_bus.items():
+        if b["sda"] == n or b["scl"] == n:
+            return bid
+    return None
+
+
+def i2c_release(n):
+    bid = _i2c_bus_on(n)
+    if bid is None:
+        return
+    b = i2c_bus.pop(bid)
+    # drop the sibling pin's ownership too (this call only carried one of them)
+    for p in (b["sda"], b["scl"]):
+        if owner[p] == "i2c":
+            owner[p] = None
+    try:
+        b["obj"].deinit()
+    except Exception:
+        pass
+
+
+def i2c_cfg(args):
+    bid = int(args.get("id", 0))
+    sda = int(args.get("sda"))
+    scl = int(args.get("scl"))
+    freq = int(args.get("freq", 100000))
+    if sda == scl:
+        raise ValueError("SDA and SCL must be different pins")
+    for n in (sda, scl):
+        if not 0 <= n < NUM_PINS:
+            raise ValueError("pin out of range")
+    prev = i2c_bus.get(bid)
+    if prev is not None and prev["sda"] == sda and prev["scl"] == scl and prev["freq"] == freq:
+        return {"ok": True, "data": read_state()}  # already live with these params
+    if prev is not None:  # changing pins or speed: tear down before rebuilding
+        i2c_bus.pop(bid)
+        for p in (prev["sda"], prev["scl"]):
+            if owner[p] == "i2c":
+                owner[p] = None
+        try:
+            prev["obj"].deinit()
+        except Exception:
+            pass
+    for n in (sda, scl):
+        if not claim(n, "i2c", force=True):  # steals gpio/pwm/adc pins, like pwm does
+            raise RuntimeError("pin GP%d busy" % n)
+    try:
+        obj = busio.I2C(_pin(scl), _pin(sda), frequency=freq)
+    except ValueError as e:
+        for n in (sda, scl):
+            if owner[n] == "i2c":
+                owner[n] = None
+        # "Invalid pins" is the rp2 PIO mux refusing the ordered pair: SCL must
+        # be odd, SDA even, and sda ≡ scl-1 (mod 4). Name the rule so the host
+        # can guide the user instead of showing a bare ValueError.
+        raise ValueError(
+            "I2C pin pair GP%d(SCL)/GP%d(SDA) not routable to one PIO "
+            "(need SCL odd, SDA even, sda==scl-1 mod 4): %s" % (scl, sda, e)
+        )
+    except RuntimeError as e:
+        # Pins are legal but the bus idles low — no pull-up / no device attached.
+        for n in (sda, scl):
+            if owner[n] == "i2c":
+                owner[n] = None
+        raise RuntimeError("I2C GP%d/GP%d bus check failed (attach a device or "
+                           "pull-ups on SDA/SCL): %s" % (scl, sda, e))
+    i2c_bus[bid] = {"obj": obj, "sda": sda, "scl": scl, "freq": freq}
+    return {"ok": True, "data": read_state()}
+
+
+def i2c_release_cmd(args):
+    bid = int(args.get("id", 0))
+    b = i2c_bus.pop(bid, None)
+    if b is not None:
+        for p in (b["sda"], b["scl"]):
+            if owner[p] == "i2c":
+                owner[p] = None
+        try:
+            b["obj"].deinit()
+        except Exception:
+            pass
+    return {"ok": True, "data": read_state()}
+
+
+def _i2c_get(args):
+    b = i2c_bus.get(int(args.get("id", 0)))
+    if b is None:
+        raise RuntimeError("no such bus (configure it first)")
+    return b
+
+
+def i2c_scan(args):
+    b = _i2c_get(args)["obj"]
+    found = []
+    with b as bus:
+        for addr in bus.scan():
+            found.append(int(addr))
+    return {"ok": True, "data": {"addrs": found}}
+
+
+def i2c_xfer(args):
+    b = _i2c_get(args)["obj"]
+    addr = int(args.get("addr"))
+    if not 0 <= addr <= 127:
+        raise ValueError("addr must be a 7-bit address (0..127)")
+    w = bytearray([int(x) & 0xFF for x in (args.get("w") or [])])
+    rlen = int(args.get("r", 0))
+    if rlen < 0 or rlen > 4096:
+        raise ValueError("r out of range")
+    rep = bool(args.get("rep_start"))
+    rd = None
+    with b as bus:
+        if rlen and w and rep:
+            # write a register pointer then repeated-start straight into the read
+            buf = bytearray(rlen)
+            bus.writeto_then_readfrom(addr, w, buf)
+            rd = buf
+        else:
+            if w:
+                bus.writeto(addr, w)
+            if rlen:
+                rd = bus.readfrom(addr, rlen)
+    return {"ok": True, "data": {"rd": list(rd) if rd is not None else []}}
+
+
 # —— ADC waveform streaming (scope feed) ——
 # While STREAM is active the deadband adc_monitor stays quiet and the
 # adc_streamer task ships whole batches instead: one event per batch keeps
@@ -421,10 +561,40 @@ def cmd_unsub(args):
 
 
 # —— capability probe ——
+# rp2 PIO I2C legality is a property of the ORDERED (scl, sda) pair, not of any
+# single pin (real-hardware grid: GP8/GP10 and every distance-2 pair are "Invalid
+# pins", while many far-apart pairs are fine), and it is tangled enough that no
+# simple human rule reproduces it. So the authoritative oracle is CircuitPython
+# itself at construction — see probe_i2c_pairs(). We deliberately do NOT probe
+# per-pin I2C "capability": on a bare harness busio.I2C raises "No pull up found"
+# for legal-but-unwired pairs, which is a wiring condition, not a pin limit, so a
+# per-pin list would wrongly mark every pin unusable.
+def probe_i2c_pairs():
+    # Each ordered (scl, sda) that CircuitPython will ACCEPT (i.e. does not raise
+    # "Invalid pins") is legal — a "No pull up" RuntimeError still proves the pin
+    # pair is routable, just not wired to a bus. Returned as [[scl,sda], ...].
+    pairs = []
+    for scl in range(NUM_PINS):
+        for sda in range(NUM_PINS):
+            if scl == sda:
+                continue
+            try:
+                o = busio.I2C(_pin(scl), _pin(sda), frequency=100000)
+                o.deinit()
+                pairs.append([scl, sda])  # bus actually came up
+            except ValueError:
+                pass  # "Invalid pins" → genuinely illegal pair, skip
+            except RuntimeError:
+                pairs.append([scl, sda])  # "No pull up" → pins are legal
+            except Exception:
+                pass
+    return pairs
+
+
 def probe_caps():
-    # Ask CircuitPython itself which pins support PWM / ADC instead of
-    # hard-coding a per-chip table that drifts with CP releases.
-    caps = {"pwm": [], "adc": []}
+    # Ask CircuitPython itself which pins support PWM / ADC, plus the legal I2C
+    # pin PAIRS, instead of hard-coding tables that drift with CP releases.
+    caps = {"pwm": [], "adc": [], "i2c_pairs": []}
     for n in range(NUM_PINS):
         try:
             p = PWMOut(_pin(n), duty_cycle=0)
@@ -439,6 +609,7 @@ def probe_caps():
             caps["adc"].append(n)
         except ValueError:
             pass
+    caps["i2c_pairs"] = probe_i2c_pairs()
     try:
         _ = microcontroller.cpu.temperature
         caps["adc"].append(TEMP_PIN)
@@ -473,6 +644,12 @@ def read_state():
             pw[str(n)] = {"freq": pwm_par[n][0], "duty": pwm_par[n][1]}
         elif owner[n] == "adc":
             adc_m |= 1 << n
+    i2c_m = 0
+    i2c_list = []
+    for bid in sorted(i2c_bus):
+        b = i2c_bus[bid]
+        i2c_m |= (1 << b["sda"]) | (1 << b["scl"])
+        i2c_list.append({"id": bid, "sda": b["sda"], "scl": b["scl"], "freq": b["freq"]})
     return {
         "in": read_inputs(),
         "out": out_bits,
@@ -482,6 +659,8 @@ def read_state():
         "cfg_pn": pn,
         "cfg_pwm": pwm_m,
         "cfg_adc": adc_m,
+        "cfg_i2c": i2c_m,
+        "i2c": i2c_list,
         "adc_temp": 1 if temp_on else 0,
         "pwm": pw,
     }
@@ -545,6 +724,10 @@ COMMANDS = {
     "adc.cfg": cmd_adc_cfg,
     "adc.stop": cmd_adc_stop,
     "adc.stream": adc_stream,
+    "i2c.cfg": i2c_cfg,
+    "i2c.release": i2c_release_cmd,
+    "i2c.scan": i2c_scan,
+    "i2c.xfer": i2c_xfer,
     "sub": cmd_sub,
     "unsub": cmd_unsub,
 }

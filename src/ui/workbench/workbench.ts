@@ -11,6 +11,7 @@ import type { FuncApi, FunctionDef } from "./types";
 import { DigitalDriver, makeDigitalDefs } from "./digital";
 import { PwmDriver, makePwmDef } from "./pwm";
 import { AdcDriver, makeAdcDef, adcText } from "./adc";
+import { I2cDriver, makeI2cDef } from "./i2c";
 
 const POLL_MS = 1000; // drift reconciliation; live levels come via gpio_in
 
@@ -20,9 +21,11 @@ export class Workbench {
   private digital: DigitalDriver;
   private pwm: PwmDriver;
   private adc: AdcDriver;
+  private i2c: I2cDriver;
   private defs: FunctionDef[];
   private labEls = new Map<MsgKey, HTMLElement>();
   private zoneEls = new Map<number, HTMLElement>();
+  private busRoles = new Set<number>(); // lanes that render their own bus cards
   private levelEls: (HTMLElement | null)[] = new Array(SLOTS).fill(null);
   private adcEls: (HTMLElement | null)[] = new Array(SLOTS).fill(null);
   private hintEl: HTMLElement;
@@ -51,12 +54,25 @@ export class Workbench {
       stopPwm: (n) => this.pwm.stop(n),
       scheduleAdc: (n) => this.adc.schedule(n),
       stopAdc: (n) => this.adc.stop(n),
+      releasePin: (n) => {
+        const def = this.defOf(this.model.roles[n]);
+        if (!def || def.renderLane) return; // bus pins are un-bound via their card
+        this.model.roles[n] = 0;
+        def.release(this.api, n);
+        this.model.changed();
+      },
     };
     this.api = api;
     this.digital = new DigitalDriver(api);
     this.pwm = new PwmDriver(api);
     this.adc = new AdcDriver(api);
-    this.defs = [...makeDigitalDefs(this.digital), makePwmDef(this.pwm), makeAdcDef(this.adc)];
+    this.i2c = new I2cDriver(this.model);
+    this.defs = [
+      ...makeDigitalDefs(this.digital),
+      makePwmDef(this.pwm),
+      makeAdcDef(this.adc),
+      makeI2cDef(this.i2c),
+    ];
     this.model.on("levels", () => this.updateLeds());
     // ADC events arrive in bursts (deadband) or once per stream batch; repaint
     // the chip digits on a fixed 250 ms tick instead of per-event so a busy
@@ -82,14 +98,22 @@ export class Workbench {
       head.innerHTML = def.icon;
       const b = document.createElement("b");
       head.appendChild(b);
-      const zone = el("wb-zone wb-list");
+      const isBus = !!def.renderLane;
+      const zone = el(isBus ? "wb-zone wb-buszone" : "wb-zone wb-list");
       zone.dataset.role = String(def.role);
       card.append(head, zone);
       lanes.appendChild(card);
       this.labEls.set(def.labelKey, b);
       this.zoneEls.set(def.role, zone);
+      if (isBus) this.busRoles.add(def.role);
     }
-    for (const z of [this.poolEl, ...this.zoneEls.values()]) {
+    // generic drop-to-lane wiring only for per-pin lanes; bus lanes bind pins
+    // through their own labeled card slots.
+    const dropZones: HTMLElement[] = [
+      this.poolEl,
+      ...[...this.zoneEls].filter(([r]) => !this.busRoles.has(r)).map(([, z]) => z),
+    ];
+    for (const z of dropZones) {
       const role = Number(z.dataset.role ?? 0);
       z.addEventListener("dragover", (e) => {
         if (this.canDrop(role)) e.preventDefault();
@@ -162,6 +186,7 @@ export class Workbench {
 
   private canDrop(role: number): boolean {
     const { model } = this;
+    if (this.busRoles.has(role)) return false; // bus lanes bind via card slots
     if (model.sel === null) return false;
     const n = model.sel;
     const cur = model.roles[n];
@@ -206,6 +231,7 @@ export class Workbench {
       if (drift.gpioDrift) this.digital.schedule();
       if (drift.pwmDrift) this.pwm.scheduleAll();
       if (drift.adcDrift) this.adc.scheduleAll();
+      if (drift.i2cDrift) this.i2c.resync();
     } catch {}
   }
 
@@ -213,9 +239,16 @@ export class Workbench {
   private mkChip(n: number, def: FunctionDef | null): HTMLElement {
     const c = el("chip", "span");
     c.draggable = this._active;
+    let i2cBadge = "";
+    if (this.model.i2cPairKnown) {
+      // rp2 I2C roles are exclusive (SCL = odd, SDA = even), so a pin is one or
+      // the other — the badge literally tells you which line it belongs on.
+      i2cBadge = this.model.i2cRoleCap(n, "scl") ? "S" : this.model.i2cRoleCap(n, "sda") ? "D" : "";
+    }
     const caps =
       (this.model.capsKnown && this.model.pwmCap(n) ? "P" : "") +
-      (this.model.capsKnown && this.model.adcCap(n) ? "A" : "");
+      (this.model.capsKnown && this.model.adcCap(n) ? "A" : "") +
+      i2cBadge;
     c.innerHTML = `<b>${pinLabel(n)}</b>${caps ? `<span class="caps">${caps}</span>` : ""}`;
     this.levelEls[n] = null;
     this.adcEls[n] = null;
@@ -254,6 +287,7 @@ export class Workbench {
     const zones: [number, HTMLElement][] = [[0, this.poolEl], ...this.zoneEls];
     for (const [role, z] of zones) {
       z.classList.remove("compat", "dim");
+      if (this.busRoles.has(role)) continue; // bus lanes highlight their own slots
       if (this.model.sel !== null) z.classList.add(this.canDrop(role) ? "compat" : "dim");
     }
   }
@@ -267,13 +301,19 @@ export class Workbench {
 
   private render(): void {
     this.poolEl.innerHTML = "";
-    for (const z of this.zoneEls.values()) z.innerHTML = "";
+    // per-pin lanes are rebuilt from scratch; bus lanes render themselves
+    // incrementally (their transaction consoles must survive a re-render).
+    for (const [role, z] of this.zoneEls) if (!this.busRoles.has(role)) z.innerHTML = "";
     this.levelEls = new Array(SLOTS).fill(null);
     this.adcEls = new Array(SLOTS).fill(null);
     for (let n = 0; n < SLOTS; n++) {
-      const def = this.defOf(this.model.roles[n]);
+      const role = this.model.roles[n];
+      if (this.busRoles.has(role)) continue; // shown inside its bus card slot
+      const def = this.defOf(role);
       (def ? this.zoneEls.get(def.role)! : this.poolEl).appendChild(this.mkChip(n, def));
     }
+    for (const def of this.defs)
+      if (def.renderLane) def.renderLane(this.api, this.zoneEls.get(def.role)!);
     this.markZones();
     if (Date.now() < this.hintLock) return;
     this.hintEl.textContent =

@@ -18,6 +18,7 @@ export interface FuncApi {
   stopPwm(n: number): void;
   scheduleAdc(n: number): void; // debounced per-pin adc.cfg claim
   stopAdc(n: number): void;
+  releasePin(n: number): void; // stop whatever function (gpio/pwm/adc) owns this pin now
 }
 
 export interface ChipView {
@@ -36,4 +37,8 @@ export interface FunctionDef {
   release(api: FuncApi, pin: number): void;
   activate(api: FuncApi): void; // link became ready: push my config
   chip(api: FuncApi, pin: number): ChipView;
+  // Multi-pin functions (I2C/SPI buses) own their lane zone: when present, the
+  // engine does not place per-pin chips here and does not accept generic drops
+  // — the def renders bus cards with their own labeled pin slots instead.
+  renderLane?(api: FuncApi, zoneEl: HTMLElement): void;
 }
