@@ -51,7 +51,7 @@ except ImportError:  # no USB CDC console on this build — binary frames off
     usb_cdc = None
 
 APP = "PicoHarness"
-VERSION = "0.1.7-i2c"
+VERSION = "0.1.11-uart"
 NUM_PINS = 29  # GP0..GP28: Pico-family boards expose up to GP28; on rp2040 GP27/28 are ADC1/ADC2
 
 # Virtual ADC channel id for the on-die temperature sensor. It is not a GP pin,
@@ -132,6 +132,8 @@ def release(n):
         adc_release(n)
     elif o == "i2c":
         i2c_release(n)
+    elif o == "uart":
+        uart_release(n)
     owner[n] = None
 
 
@@ -458,6 +460,144 @@ def i2c_xfer(args):
     return {"ok": True, "data": {"rd": list(rd) if rd is not None else []}}
 
 
+# —— UART bus driver ——
+# Like I2C, a UART owns a pin PAIR, but either member may be absent: TX-only
+# (write) and RX-only (read) buses are legal, so a bus is "complete" when at
+# least one of tx/rx is bound. rp2 hardware UART (UART0/UART1) only exposes a
+# fixed set of TX and RX pins, and a full-duplex pair must land on the same
+# instance, so legality is pair-based — probe_uart() discovers the usable TX
+# pins, RX pins, and ordered (tx,rx) pairs and the host greys the rest.
+uart_bus = {}  # id -> {"obj": UART, "tx": n|-1, "rx": m|-1, "baud": hz}
+
+
+def _uart_bus_on(n):
+    for bid, b in uart_bus.items():
+        if b["tx"] == n or b["rx"] == n:
+            return bid
+    return None
+
+
+def uart_release(n):
+    bid = _uart_bus_on(n)
+    if bid is None:
+        return
+    b = uart_bus.pop(bid)
+    for p in (b["tx"], b["rx"]):
+        if p >= 0 and owner[p] == "uart":
+            owner[p] = None
+    try:
+        b["obj"].deinit()
+    except Exception:
+        pass
+
+
+def uart_cfg(args):
+    bid = int(args.get("id", 0))
+    tx = int(args.get("tx", -1))
+    rx = int(args.get("rx", -1))
+    baud = int(args.get("baud", 115200))
+    if tx < 0 and rx < 0:
+        raise ValueError("a UART bus needs at least a TX or an RX pin")
+    for n in (tx, rx):
+        if n >= 0 and not 0 <= n < NUM_PINS:
+            raise ValueError("pin out of range")
+    if tx >= 0 and tx == rx:
+        raise ValueError("TX and RX must be different pins")
+    prev = uart_bus.get(bid)
+    if prev is not None and prev["tx"] == tx and prev["rx"] == rx and prev["baud"] == baud:
+        return {"ok": True, "data": read_state()}
+    if prev is not None:
+        uart_bus.pop(bid)
+        for p in (prev["tx"], prev["rx"]):
+            if p >= 0 and owner[p] == "uart":
+                owner[p] = None
+        try:
+            prev["obj"].deinit()
+        except Exception:
+            pass
+    for n in (tx, rx):
+        if n >= 0 and not claim(n, "uart", force=True):
+            raise RuntimeError("pin GP%d busy" % n)
+    try:
+        obj = busio.UART(
+            _pin(tx) if tx >= 0 else None,
+            _pin(rx) if rx >= 0 else None,
+            baudrate=baud,
+            # Non-blocking by default: the streaming uart_monitor polls every
+            # tick, and CircuitPython's 1000 ms read timeout would freeze the
+            # whole cooperative loop waiting for the first byte. uart_read
+            # bumps this back to a bounded wait for the manual capture button.
+            timeout=0,
+        )
+    except Exception as e:
+        for n in (tx, rx):
+            if n >= 0 and owner[n] == "uart":
+                owner[n] = None
+        raise ValueError(
+            "UART GP%d(TX)/GP%d(RX) not routable — rp2 hardware UART pins are fixed "
+            "and a full-duplex pair must share one UART instance (see caps.uart): %s"
+            % (tx, rx, e)
+        )
+    uart_bus[bid] = {"obj": obj, "tx": tx, "rx": rx, "baud": baud}
+    return {"ok": True, "data": read_state()}
+
+
+def uart_release_cmd(args):
+    bid = int(args.get("id", 0))
+    b = uart_bus.pop(bid, None)
+    if b is not None:
+        for p in (b["tx"], b["rx"]):
+            if p >= 0 and owner[p] == "uart":
+                owner[p] = None
+        try:
+            b["obj"].deinit()
+        except Exception:
+            pass
+    return {"ok": True, "data": read_state()}
+
+
+def _uart_get(args):
+    b = uart_bus.get(int(args.get("id", 0)))
+    if b is None:
+        raise RuntimeError("no such bus (configure it first)")
+    return b
+
+
+def uart_write(args):
+    b = _uart_get(args)
+    if b["tx"] < 0:
+        raise RuntimeError("this bus has no TX pin — bind one first")
+    data = bytearray([int(x) & 0xFF for x in (args.get("data") or [])])
+    if not data:
+        raise ValueError("no data to write")
+    n = b["obj"].write(data)
+    return {"ok": True, "data": {"written": int(n) if n is not None else 0}}
+
+
+def uart_read(args):
+    b = _uart_get(args)
+    if b["rx"] < 0:
+        raise RuntimeError("this bus has no RX pin — bind one first")
+    n = max(0, min(4096, int(args.get("n", 64))))
+    # The bus object is created non-blocking (timeout=0) for the streaming
+    # monitor; the manual capture wants a short bounded wait so a Read click
+    # can actually gather freshly-arriving bytes instead of returning empty.
+    try:
+        b["obj"].timeout = 200
+    except Exception:
+        pass
+    try:
+        data = b["obj"].read(n)
+    finally:
+        # Restore the non-blocking default so the streaming monitor's next
+        # read() never inherits this wait and stalls the loop.
+        try:
+            b["obj"].timeout = 0
+        except Exception:
+            pass
+    return {"ok": True, "data": {"rd": list(data) if data else []}}
+
+
 # —— ADC waveform streaming (scope feed) ——
 # While STREAM is active the deadband adc_monitor stays quiet and the
 # adc_streamer task ships whole batches instead: one event per batch keeps
@@ -591,10 +731,35 @@ def probe_i2c_pairs():
     return pairs
 
 
+def probe_uart():
+    # Deterministic hardware-UART pin map, NOT a runtime construct probe. On the
+    # RP2350 only 2 hardware UARTs exist (UART0/UART1), and which GPIO can be
+    # their TX vs RX is a fixed property of the pinctrl (RP2350 datasheet Table 3,
+    # "GPIO Bank 0 Functions"): even GPIOs are always a UART TX (or CTS), odd
+    # GPIOs always a UART RX (or RTS), and a full-duplex pair must sit on the same
+    # instance. Probing by busio.UART construction was flaky because rp2 UART/PWM/
+    # I2C all contend for PIO + instances, so the same pins passed or failed
+    # depending on leftover state — the datasheet rule is the stable oracle.
+    #
+    # Instance per TX/RX pin, read straight off Table 3 (Pico 2 breaks out GP0..26).
+    tx_inst = {0: 0, 2: 0, 4: 1, 6: 1, 8: 1, 10: 1, 12: 0, 14: 0, 16: 0, 18: 0, 20: 1, 22: 1, 24: 1, 26: 1}
+    rx_inst = {1: 0, 3: 0, 5: 1, 7: 1, 9: 1, 11: 1, 13: 0, 15: 0, 17: 0, 19: 0, 21: 1, 23: 1, 25: 1}
+    # GP0/GP1 are the RP2350 UART0 TX/RX that CircuitPython's own serial console
+    # keeps claimed at boot, so busio.UART() on them raises "GP1 in use". They are
+    # hardware-legal but never usable here — drop them so the UI never offers a
+    # pair that fails (this was the source of the "works sometimes, not others"
+    # flakiness). Other UART0 pins (GP2/3, GP12/13, ...) stay available.
+    reserved = {0, 1}
+    tx_ok = [n for n in sorted(tx_inst) if n < NUM_PINS and n not in reserved]
+    rx_ok = [n for n in sorted(rx_inst) if n < NUM_PINS and n not in reserved]
+    pairs = [[t, r] for t in tx_ok for r in rx_ok if tx_inst[t] == rx_inst[r]]
+    return {"tx": tx_ok, "rx": rx_ok, "pairs": pairs}
+
+
 def probe_caps():
     # Ask CircuitPython itself which pins support PWM / ADC, plus the legal I2C
     # pin PAIRS, instead of hard-coding tables that drift with CP releases.
-    caps = {"pwm": [], "adc": [], "i2c_pairs": []}
+    caps = {"pwm": [], "adc": [], "i2c_pairs": [], "uart": {"tx": [], "rx": [], "pairs": []}}
     for n in range(NUM_PINS):
         try:
             p = PWMOut(_pin(n), duty_cycle=0)
@@ -610,6 +775,7 @@ def probe_caps():
         except ValueError:
             pass
     caps["i2c_pairs"] = probe_i2c_pairs()
+    caps["uart"] = probe_uart()
     try:
         _ = microcontroller.cpu.temperature
         caps["adc"].append(TEMP_PIN)
@@ -650,6 +816,15 @@ def read_state():
         b = i2c_bus[bid]
         i2c_m |= (1 << b["sda"]) | (1 << b["scl"])
         i2c_list.append({"id": bid, "sda": b["sda"], "scl": b["scl"], "freq": b["freq"]})
+    uart_m = 0
+    uart_list = []
+    for bid in sorted(uart_bus):
+        b = uart_bus[bid]
+        if b["tx"] >= 0:
+            uart_m |= 1 << b["tx"]
+        if b["rx"] >= 0:
+            uart_m |= 1 << b["rx"]
+        uart_list.append({"id": bid, "tx": b["tx"], "rx": b["rx"], "baud": b["baud"]})
     return {
         "in": read_inputs(),
         "out": out_bits,
@@ -661,6 +836,8 @@ def read_state():
         "cfg_adc": adc_m,
         "cfg_i2c": i2c_m,
         "i2c": i2c_list,
+        "cfg_uart": uart_m,
+        "uart": uart_list,
         "adc_temp": 1 if temp_on else 0,
         "pwm": pw,
     }
@@ -728,6 +905,10 @@ COMMANDS = {
     "i2c.release": i2c_release_cmd,
     "i2c.scan": i2c_scan,
     "i2c.xfer": i2c_xfer,
+    "uart.cfg": uart_cfg,
+    "uart.release": uart_release_cmd,
+    "uart.write": uart_write,
+    "uart.read": uart_read,
     "sub": cmd_sub,
     "unsub": cmd_unsub,
 }
@@ -895,6 +1076,59 @@ async def adc_streamer():
         await asyncio.sleep(dt if dt > 0.001 else 0.001)
 
 
+def _uart_topic_id(topic):
+    # "uart.<id>" -> int bus id, or None for any other topic.
+    if not topic.startswith("uart."):
+        return None
+    try:
+        return int(topic[5:])
+    except ValueError:
+        return None
+
+
+async def uart_monitor():
+    # Streams RX bytes of any bus the host subscribed to (topic "uart.<id>") as
+    # uart_rx events, so the console can show a live serial terminal. Non-blocking
+    # read() each tick; only emits when bytes actually arrived, so an idle wire
+    # stays silent. A bus that disappears (released / reconfigured away) drops its
+    # subscription automatically.
+    alive = False
+    while True:
+        try:
+            if not alive:
+                alive = True
+                send({"evt": "dbg", "task": "uart", "alive": True})
+            for topic in list(SUBS):
+                bid = _uart_topic_id(topic)
+                if bid is None:
+                    continue
+                b = uart_bus.get(bid)
+                if b is None or b["rx"] < 0:
+                    SUBS.pop(topic, None)
+                    continue
+                # Drain the whole RX buffer each tick, not just 256 bytes: a
+                # single capped read leaves leftovers in the hardware FIFO that
+                # only surface on the NEXT tick, which looks like multi-second
+                # "batch" lag whenever the loop is briefly starved. Collect until
+                # read() returns empty (bounded so a flood can't wedge the loop).
+                chunks = []
+                total = 0
+                for _ in range(16):
+                    data = b["obj"].read(256)
+                    if not data:
+                        break
+                    chunks.append(data)
+                    total += len(data)
+                    if total >= 4096:
+                        break
+                if chunks:
+                    payload = chunks[0] if len(chunks) == 1 else b"".join(chunks)
+                    send({"evt": "uart_rx", "id": bid, "data": list(payload)})
+        except Exception as e:  # never let a task die silently under gather
+            send({"evt": "dbg", "task": "uart", "err": "%s: %s" % (type(e).__name__, e)})
+        await asyncio.sleep(0.01)
+
+
 async def main():
     send({"evt": "dbg", "task": "main", "alive": True})
     # Official asyncio guide pattern: create_task each coroutine, gather the
@@ -903,7 +1137,8 @@ async def main():
     t_gpio = asyncio.create_task(gpio_monitor())
     t_adc = asyncio.create_task(adc_monitor())
     t_stream = asyncio.create_task(adc_streamer())
-    await asyncio.gather(t_cmd, t_gpio, t_adc, t_stream)
+    t_uart = asyncio.create_task(uart_monitor())
+    await asyncio.gather(t_cmd, t_gpio, t_adc, t_stream, t_uart)
 
 
 asyncio.run(main())

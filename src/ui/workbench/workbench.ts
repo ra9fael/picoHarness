@@ -12,6 +12,7 @@ import { DigitalDriver, makeDigitalDefs } from "./digital";
 import { PwmDriver, makePwmDef } from "./pwm";
 import { AdcDriver, makeAdcDef, adcText } from "./adc";
 import { I2cDriver, makeI2cDef } from "./i2c";
+import { UartDriver, makeUartDef } from "./uart";
 
 const POLL_MS = 1000; // drift reconciliation; live levels come via gpio_in
 
@@ -22,6 +23,7 @@ export class Workbench {
   private pwm: PwmDriver;
   private adc: AdcDriver;
   private i2c: I2cDriver;
+  private uart: UartDriver;
   private defs: FunctionDef[];
   private labEls = new Map<MsgKey, HTMLElement>();
   private zoneEls = new Map<number, HTMLElement>();
@@ -67,11 +69,13 @@ export class Workbench {
     this.pwm = new PwmDriver(api);
     this.adc = new AdcDriver(api);
     this.i2c = new I2cDriver(this.model);
+    this.uart = new UartDriver(this.model);
     this.defs = [
       ...makeDigitalDefs(this.digital),
       makePwmDef(this.pwm),
       makeAdcDef(this.adc),
       makeI2cDef(this.i2c),
+      makeUartDef(this.uart),
     ];
     this.model.on("levels", () => this.updateLeds());
     // ADC events arrive in bursts (deadband) or once per stream batch; repaint
@@ -146,6 +150,11 @@ export class Workbench {
 
   setCaps(caps: any): void {
     this.model.setCaps(caps);
+    // A (re)handshake means the device's volatile I2C/UART configs are gone, so
+    // clear each driver's rejection latch — otherwise a bus that failed on the
+    // old firmware (or before a reboot) would be skipped by resync forever.
+    this.i2c.resetLatch();
+    this.uart.resetLatch();
     this.render();
   }
 
@@ -232,6 +241,7 @@ export class Workbench {
       if (drift.pwmDrift) this.pwm.scheduleAll();
       if (drift.adcDrift) this.adc.scheduleAll();
       if (drift.i2cDrift) this.i2c.resync();
+    if (drift.uartDrift) this.uart.resync();
     } catch {}
   }
 
@@ -245,10 +255,18 @@ export class Workbench {
       // the other — the badge literally tells you which line it belongs on.
       i2cBadge = this.model.i2cRoleCap(n, "scl") ? "S" : this.model.i2cRoleCap(n, "sda") ? "D" : "";
     }
+    let uartBadge = "";
+    if (this.model.uartKnown) {
+      // A UART pin may be TX-capable, RX-capable, or both, so concatenate.
+      const t = this.model.uartRoleCap(n, "tx");
+      const r = this.model.uartRoleCap(n, "rx");
+      uartBadge = (t ? "T" : "") + (r ? "R" : "");
+    }
     const caps =
       (this.model.capsKnown && this.model.pwmCap(n) ? "P" : "") +
       (this.model.capsKnown && this.model.adcCap(n) ? "A" : "") +
-      i2cBadge;
+      i2cBadge +
+      uartBadge;
     c.innerHTML = `<b>${pinLabel(n)}</b>${caps ? `<span class="caps">${caps}</span>` : ""}`;
     this.levelEls[n] = null;
     this.adcEls[n] = null;

@@ -2,6 +2,7 @@ import { SerialLink, type LinkState } from "./serial";
 import { ConsolePanel } from "./console";
 import { Workbench } from "./workbench/workbench";
 import { Scope } from "./workbench/scope";
+import { UartTerminals } from "./workbench/uartterm";
 import { t, tf, getLang, setLang, type MsgKey } from "./i18n";
 
 const $ = (id: string) => document.getElementById(id) as HTMLElement;
@@ -31,6 +32,7 @@ const consolePanel = new ConsolePanel(
   link,
   $("term"),
   () => {
+    if (consolePanel.mode === "repl") uartTerms.selectConsole();
     applyModeLabels();
     syncUi();
   },
@@ -42,6 +44,17 @@ const scope = new Scope(link, wb.model, (m) => consolePanel.note(m), $("scope"))
 // them and feeds the newest row back into the model for the chip readouts.
 link.onFrame = (payload) => scope.onFrame(payload);
 scope.onLatest = (vals) => wb.model.ingestAdc(vals);
+
+// One live terminal tab per UART bus, sharing the console dock with the raw
+// mirror. Tabs follow the bus list; RX events route to the matching terminal.
+const uartTerms = new UartTerminals(
+  link,
+  wb.model,
+  $("console-tabs"),
+  $("uart-panes"),
+  $("term")
+);
+wb.model.on("config", () => uartTerms.sync());
 
 function applyModeLabels() {
   const m = consolePanel.mode;
@@ -69,6 +82,7 @@ function applyStaticLabels() {
   btnLang.textContent = t("btn_lang");
   wb.refreshLang();
   scope.refreshLang();
+  uartTerms.refreshLang();
   applyModeLabels();
   const dock = $("console-dock");
   btnCollapse.textContent = dock.classList.contains("collapsed")
@@ -87,6 +101,10 @@ link.onEvent = (m) => {
     scope.onMsg(m); // batched waveform frames: drawn on rAF, never logged
     return;
   }
+  if (m.evt === "uart_rx") {
+    uartTerms.onRx(m.id as number, m.data as number[]); // streamed RX bytes: typed into the tab, never logged
+    return;
+  }
   if (m.evt === "gpio_in" || m.evt === "adc") {
     wb.onEvent(m); // live levels / ADC readings: handled silently, targeted refresh
     return;
@@ -97,6 +115,7 @@ link.onEvent = (m) => {
 btnConnect.addEventListener("click", async () => {
   if (linkState !== "closed") {
     await link.disconnect(); // fires onStateChange(closed); syncUi updates label
+    uartTerms.onDisconnect();
     consolePanel.reset();
     consolePanel.note(t("disconnected"));
     return;
@@ -104,6 +123,7 @@ btnConnect.addEventListener("click", async () => {
   try {
     const ready = await link.connect();
     wb.setCaps(ready.caps);
+    uartTerms.onLinkReady();
     consolePanel.note(tf("handshake_ok", JSON.stringify(ready)));
   } catch (e: any) {
     consolePanel.note(tf("handshake_fail", e.message));
@@ -142,20 +162,29 @@ btnLang.addEventListener("click", () => {
   applyStaticLabels();
 });
 
-$("btn-clear").addEventListener("click", () => consolePanel.clear());
+$("btn-clear").addEventListener("click", () => {
+  if (uartTerms.uartActive()) uartTerms.clearActive();
+  else consolePanel.clear();
+});
 
 $("btn-copy").addEventListener("click", async () => {
+  const uart = uartTerms.uartActive();
+  const note = (m: string) => (uart ? uartTerms.noteActive(m) : consolePanel.note(m));
   try {
-    const text = await consolePanel.copyAll();
-    consolePanel.note(tf("log_copied", text.split("\n").length - 1));
+    const text = uart ? uartTerms.bufferText() : await consolePanel.copyAll();
+    if (uart) await consolePanel.copyText(text);
+    note(tf("log_copied", text.split("\n").length - 1));
   } catch (e: any) {
-    consolePanel.note(tf("log_copy_fail", e.message));
+    note(tf("log_copy_fail", e.message));
   }
 });
 
 $("btn-export").addEventListener("click", () => {
-  const { name } = consolePanel.exportFile();
-  consolePanel.note(tf("log_exported", name));
+  const uart = uartTerms.uartActive();
+  const { name } = uart ? consolePanel.exportText(uartTerms.bufferText()) : consolePanel.exportFile();
+  (uart ? (m: string) => uartTerms.noteActive(m) : (m: string) => consolePanel.note(m))(
+    tf("log_exported", name)
+  );
 });
 
 btnCollapse.addEventListener("click", () => {

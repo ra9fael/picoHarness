@@ -3,7 +3,7 @@
 // through the normal gpio.cfg sendNow + pwm drift-reconciliation path once
 // the link becomes ready, so no restore-time commands are needed here.
 import type { PinModel } from "./pins";
-import { SLOTS, R_PWM, R_ADC, R_I2C, PWM_UNIT_AUTO } from "./pins";
+import { SLOTS, R_PWM, R_ADC, R_I2C, R_UART, PWM_UNIT_AUTO } from "./pins";
 
 const KEY = "picoharness-config-v1";
 
@@ -18,12 +18,13 @@ export type PinSnap = {
 };
 
 export type BusSnap = { id: number; sda: number; scl: number; freq: number };
+export type UartSnap = { id: number; tx: number; rx: number; baud: number };
 
 export function saveConfig(model: PinModel): void {
   const pins: PinSnap[] = [];
   for (let n = 0; n < SLOTS; n++) {
     const r = model.roles[n];
-    if (!r || r === R_I2C) continue; // bus pins are reconstructed from `buses`
+    if (!r || r === R_I2C || r === R_UART) continue; // bus pins are reconstructed from `buses`/`uarts`
     const s: PinSnap = { n, r, p: model.pulls[n] };
     const pw = model.pwm[n];
     if (r === R_PWM && pw) {
@@ -35,8 +36,9 @@ export function saveConfig(model: PinModel): void {
     pins.push(s);
   }
   const buses: BusSnap[] = model.buses.map((b) => ({ ...b }));
+  const uarts: UartSnap[] = model.uartBuses.map((b) => ({ ...b }));
   try {
-    localStorage.setItem(KEY, JSON.stringify({ v: 1, pins, buses }));
+    localStorage.setItem(KEY, JSON.stringify({ v: 1, pins, buses, uarts }));
   } catch {}
 }
 
@@ -56,6 +58,8 @@ export function loadConfig(model: PinModel): number {
   model.adcFmt.fill(0);
   model.buses = [];
   model.pinBus.fill(-1);
+  model.uartBuses = [];
+  model.uartPinBus.fill(-1);
   let count = 0;
   for (const s of obj.pins) {
     if (typeof s?.n !== "number" || s.n < 0 || s.n >= SLOTS || !Number.isInteger(s.n)) continue;
@@ -87,6 +91,21 @@ export function loadConfig(model: PinModel): number {
         model.setBusSlot(nb.id, "sda", b.sda);
       if (typeof b.scl === "number" && b.scl >= 0 && b.scl < SLOTS)
         model.setBusSlot(nb.id, "scl", b.scl);
+      count++;
+    }
+  }
+  // Rebuild UARTs the same way: adopt stored ids, re-bind tx/rx through
+  // setUartSlot (restores roles[]=R_UART + uartPinBus). A bus may have only one
+  // line bound (tx- or rx-only), so bind each pin independently.
+  if (Array.isArray(obj.uarts)) {
+    for (const b of obj.uarts) {
+      if (typeof b?.id !== "number" || !Number.isInteger(b.id)) continue;
+      const nb = model.addUartBus();
+      nb.id = b.id;
+      model.adoptUartBusId(b.id);
+      nb.baud = typeof b.baud === "number" && b.baud > 0 ? b.baud : 115200;
+      if (typeof b.tx === "number" && b.tx >= 0 && b.tx < SLOTS) model.setUartSlot(nb.id, "tx", b.tx);
+      if (typeof b.rx === "number" && b.rx >= 0 && b.rx < SLOTS) model.setUartSlot(nb.id, "rx", b.rx);
       count++;
     }
   }

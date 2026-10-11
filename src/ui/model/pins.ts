@@ -6,13 +6,20 @@ import { Emitter } from "../core/events";
 import type { JsonMsg } from "../types";
 
 export const NUM = 29; // GP0..GP28, matching firmware NUM_PINS
-export const R_IN = 1, R_OUT = 2, R_PWM = 3, R_ADC = 4, R_I2C = 5;
+export const R_IN = 1, R_OUT = 2, R_PWM = 3, R_ADC = 4, R_I2C = 5, R_UART = 6;
 
 // An I2C bus is a multi-pin function: it owns a named PAIR of pins (sda/scl
 // hold model slot indices, -1 = unassigned) plus a clock rate. Bus instances
 // live in PinModel.buses; the pins they claim carry roles[]=R_I2C and a
 // pinBus[] back-pointer so the per-pin lane/pool logic treats them as taken.
 export type I2cBus = { id: number; sda: number; scl: number; freq: number };
+
+// A UART is also a multi-pin function but only needs ONE of its two members:
+// tx or rx may be -1 (a transmit-only or receive-only bus), so "complete"
+// means at least one bound. Its pins carry roles[]=R_UART and a uartPinBus[]
+// back-pointer. rp2 hardware UART pins are fixed, so full-duplex (tx,rx) pairs
+// are constrained — see uartPairs.
+export type UartBus = { id: number; tx: number; rx: number; baud: number };
 
 // The on-die temperature sensor is a virtual ADC channel: it occupies one extra
 // model slot (index TEMP) but travels on the wire as pin TEMP_PIN, matching the
@@ -52,6 +59,9 @@ export class PinModel extends Emitter {
   buses: I2cBus[] = []; // I2C bus instances (multi-pin functions)
   pinBus = new Int16Array(SLOTS).fill(-1); // slot -> owning bus id, -1 = not in a bus
   private busSeq = 0; // monotonic source of bus ids
+  uartBuses: UartBus[] = []; // UART bus instances (tx and/or rx)
+  uartPinBus = new Int16Array(SLOTS).fill(-1); // slot -> owning uart id, -1 = not in a uart
+  private uartBusSeq = 0; // monotonic source of uart ids
   private pwmCaps: number[] | null = null; // firmware caps.pwm; null = unknown
   private adcCaps: number[] | null = null;
   // rp2 PIO I2C legality is a property of the ORDERED (scl, sda) pair, not of
@@ -63,6 +73,14 @@ export class PinModel extends Emitter {
   private i2cPairs: Set<string> | null = null;
   private i2cSclPins: Set<number> | null = null; // pins usable as SCL (some pair)
   private i2cSdaPins: Set<number> | null = null; // pins usable as SDA (some pair)
+  // rp2 hardware UART: only a fixed subset of pins carry the TX or RX function,
+  // and a full-duplex pair must sit on one UART instance, so both the per-role
+  // pin sets and the ordered (tx,rx) pair set come from caps.uart. A single pin
+  // is always a legal bus on its own (transmit- or receive-only), so pair
+  // legality only gates the case where BOTH slots are filled. null = unknown.
+  private uartTxPins: Set<number> | null = null;
+  private uartRxPins: Set<number> | null = null;
+  private uartPairs: Set<string> | null = null;
 
   // Drivers call this after any user-facing config mutation so the store
   // can coalesce saves; "levels" is only about live pin values.
@@ -91,6 +109,24 @@ export class PinModel extends Emitter {
       this.i2cPairs = null;
       this.i2cSclPins = null;
       this.i2cSdaPins = null;
+    }
+    const u = caps?.uart;
+    const utx = Array.isArray(u?.tx) ? u.tx.map(Number) : null;
+    const urx = Array.isArray(u?.rx) ? u.rx.map(Number) : null;
+    const upairs = Array.isArray(u?.pairs) ? u.pairs : null;
+    this.uartTxPins = utx ? new Set(utx.filter(Number.isInteger)) : null;
+    this.uartRxPins = urx ? new Set(urx.filter(Number.isInteger)) : null;
+    if (upairs) {
+      this.uartPairs = new Set<string>();
+      for (const p of upairs) {
+        if (!Array.isArray(p) || p.length < 2) continue;
+        const tx = Number(p[0]);
+        const rx = Number(p[1]);
+        if (!Number.isInteger(tx) || !Number.isInteger(rx)) continue;
+        this.uartPairs.add(tx + ":" + rx);
+      }
+    } else {
+      this.uartPairs = null;
     }
   }
 
@@ -137,6 +173,36 @@ export class PinModel extends Emitter {
     const other = role === "scl" ? bus.sda : bus.scl;
     if (other === n) return false; // one pin can't be both lines
     if (other >= 0) return role === "scl" ? this.i2cPairOk(n, other) : this.i2cPairOk(other, n);
+    return true;
+  }
+
+  // —— UART predicates ——
+  get uartKnown(): boolean {
+    return this.uartTxPins !== null || this.uartRxPins !== null;
+  }
+
+  // Whether pin n can serve as the TX (or RX) line of some UART. Unknown caps →
+  // permissive; the device rejects an unroutable pin at cfg time.
+  uartRoleCap(n: number, role: "tx" | "rx"): boolean {
+    if (n === TEMP || n < 0 || n >= NUM) return false;
+    const set = role === "tx" ? this.uartTxPins : this.uartRxPins;
+    return !set || set.has(n);
+  }
+
+  // Whether the ordered (tx, rx) pair lands on one UART instance. Unknown → permissive.
+  uartPairOk(tx: number, rx: number): boolean {
+    if (!this.uartPairs) return true;
+    return this.uartPairs.has(tx + ":" + rx);
+  }
+
+  // Pin n may enter the given slot of `bus`: role-capable, not the pin already in
+  // the other slot, and — only when the other slot is filled — part of a legal
+  // full-duplex pair. A single bound pin is always fine (tx-only / rx-only bus).
+  uartSlotOk(bus: UartBus, role: "tx" | "rx", n: number): boolean {
+    if (!this.uartRoleCap(n, role)) return false;
+    const other = role === "tx" ? bus.rx : bus.tx;
+    if (other === n) return false;
+    if (other >= 0) return role === "tx" ? this.uartPairOk(n, other) : this.uartPairOk(other, n);
     return true;
   }
 
@@ -265,6 +331,90 @@ export class PinModel extends Emitter {
       .join(";");
   }
 
+  // —— UART bus instances ——
+  // "Complete" here means at least one of tx/rx is bound (a half bus is a valid
+  // transmit- or receive-only UART), unlike I2C where both lines are required.
+  uartComplete(b: UartBus): boolean {
+    return b.tx >= 0 || b.rx >= 0;
+  }
+
+  busUartById(id: number): UartBus | undefined {
+    return this.uartBuses.find((b) => b.id === id);
+  }
+
+  addUartBus(): UartBus {
+    const b: UartBus = { id: this.uartBusSeq++, tx: -1, rx: -1, baud: 115200 };
+    this.uartBuses.push(b);
+    return b;
+  }
+
+  adoptUartBusId(id: number): void {
+    if (id >= this.uartBusSeq) this.uartBusSeq = id + 1;
+  }
+
+  uartBusOf(n: number): UartBus | undefined {
+    const id = this.uartPinBus[n];
+    return id >= 0 ? this.busUartById(id) : undefined;
+  }
+
+  // Bind a pin into a uart slot; mirrors setBusSlot but for tx/rx and the
+  // separate uartPinBus back-pointer + R_UART role.
+  setUartSlot(busId: number, which: "tx" | "rx", pin: number): void {
+    const b = this.busUartById(busId);
+    if (!b) return;
+    const prev = which === "tx" ? b.tx : b.rx;
+    if (prev >= 0 && prev !== pin) {
+      this.roles[prev] = 0;
+      this.uartPinBus[prev] = -1;
+    }
+    if (pin >= 0) {
+      const other = this.uartPinBus[pin];
+      if (other >= 0 && other !== busId) {
+        const ob = this.busUartById(other);
+        if (ob) {
+          if (ob.tx === pin) ob.tx = -1;
+          if (ob.rx === pin) ob.rx = -1;
+        }
+      }
+      this.roles[pin] = R_UART;
+      this.uartPinBus[pin] = busId;
+      if (which === "tx") b.tx = pin;
+      else b.rx = pin;
+    } else {
+      if (which === "tx") b.tx = -1;
+      else b.rx = -1;
+    }
+  }
+
+  removeUartBus(id: number): void {
+    const b = this.busUartById(id);
+    if (!b) return;
+    for (const p of [b.tx, b.rx]) {
+      if (p >= 0) {
+        this.roles[p] = 0;
+        this.uartPinBus[p] = -1;
+      }
+    }
+    this.uartBuses = this.uartBuses.filter((x) => x.id !== id);
+  }
+
+  uartMask(): number {
+    let m = 0;
+    for (const b of this.uartBuses) {
+      if (b.tx >= 0) m |= 1 << b.tx;
+      if (b.rx >= 0) m |= 1 << b.rx;
+    }
+    return m;
+  }
+
+  uartSig(): string {
+    return this.uartBuses
+      .filter((b) => this.uartComplete(b))
+      .map((b) => `${b.id}:${b.tx},${b.rx},${b.baud}`)
+      .sort()
+      .join(";");
+  }
+
   i2cComplete(b: I2cBus): boolean {
     return b.sda >= 0 && b.scl >= 0;
   }
@@ -311,12 +461,13 @@ export class PinModel extends Emitter {
   applyState(
     d: any,
     fromCmd: boolean
-  ): { gpioDrift: boolean; pwmDrift: boolean; adcDrift: boolean; i2cDrift: boolean } {
+  ): { gpioDrift: boolean; pwmDrift: boolean; adcDrift: boolean; i2cDrift: boolean; uartDrift: boolean } {
     this.devIn = d.in >>> 0;
     this.devOut = d.out >>> 0;
     this.devPwm = (d.cfg_pwm ?? 0) >>> 0;
     this.emit("levels");
-    if (fromCmd) return { gpioDrift: false, pwmDrift: false, adcDrift: false, i2cDrift: false };
+    if (fromCmd)
+      return { gpioDrift: false, pwmDrift: false, adcDrift: false, i2cDrift: false, uartDrift: false };
     const w = this.cfgMasks();
     const gpioDrift =
       d.cfg_in !== w.in || d.cfg_out !== w.out ||
@@ -331,6 +482,13 @@ export class PinModel extends Emitter {
           .join(";")
       : "";
     const i2cDrift = devI2cSig !== this.i2cSig();
-    return { gpioDrift, pwmDrift, adcDrift, i2cDrift };
+    const devUartSig = Array.isArray(d.uart)
+      ? d.uart
+          .map((x: any) => `${x.id}:${x.tx},${x.rx},${x.baud}`)
+          .sort()
+          .join(";")
+      : "";
+    const uartDrift = devUartSig !== this.uartSig();
+    return { gpioDrift, pwmDrift, adcDrift, i2cDrift, uartDrift };
   }
 }

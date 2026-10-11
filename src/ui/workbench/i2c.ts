@@ -114,6 +114,16 @@ export class I2cDriver {
     }
   }
 
+  // A fresh handshake means a device whose volatile bus config was just lost
+  // (reboot or firmware reflash). Forget the rejection/live latches so the next
+  // resync re-issues i2c.cfg once per bus — a reconnect is a user-level retry.
+  resetLatch(): void {
+    for (const card of this.cards.values()) {
+      card.live = false;
+      card.rejected = false;
+    }
+  }
+
   // —— pin binding ——
   bind(busId: number, which: "sda" | "scl", pin: number): void {
     const api = this.api;

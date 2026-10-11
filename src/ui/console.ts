@@ -90,7 +90,7 @@ export class ConsolePanel {
   }
 
   // Plain-text dump of the visible scrollback, ANSI stripped.
-  private bufferText(): string {
+  bufferText(): string {
     const b = this.term.buffer.active;
     const lines: string[] = [];
     for (let i = 0; i < b.length; i++) {
@@ -101,7 +101,11 @@ export class ConsolePanel {
   }
 
   async copyAll(): Promise<string> {
-    const text = this.bufferText();
+    return this.copyText(this.bufferText());
+  }
+
+  // Shared clipboard path: usable for the console mirror or a UART tab buffer.
+  async copyText(text: string): Promise<string> {
     try {
       await navigator.clipboard.writeText(text);
     } catch {
@@ -119,7 +123,10 @@ export class ConsolePanel {
   }
 
   exportFile(): { name: string; lines: number } {
-    const text = this.bufferText();
+    return this.exportText(this.bufferText());
+  }
+
+  exportText(text: string): { name: string; lines: number } {
     const d = new Date();
     const p = (n: number) => String(n).padStart(2, "0");
     const name = `picoharness-log-${d.getFullYear()}${p(d.getMonth() + 1)}${p(
