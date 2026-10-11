@@ -2,13 +2,13 @@
 
 This is a quick reference, not a tutorial. If you want to know how to use the harness, read the [01 User Manual](../01_GUIApp_FW_Manual/README.md) first.
 
-Every external interface of firmware version 0.1.11-uart.
+Every external interface of firmware version 0.1.13-dualcdc.
 
 ---
 
 ## 1. Transport Layer
 
-One serial byte stream carries two kinds of frames.
+One serial byte stream carries two kinds of frames. That stream runs on the `usb_cdc.data` port, opened by `usb_cdc.enable(console=True, data=True)` in `boot.py`; the `console` port belongs to CircuitPython again and only carries the banner, `print`, tracebacks and the REPL — never protocol bytes. Without `boot.py` on the board, `usb_cdc.data` is `None` and the protocol falls back to the single CDC port with the same framing.
 
 ### 1.1 Text Frames (JSON-lines)
 
@@ -44,7 +44,7 @@ The first byte of the payload is the **kind**, which says which stream this is:
 | --- | --- | --- |
 | 1 | ADC waveform batch | `struct.pack("<BBHH", 1, nch, ms, nrows)` + `u16le[nch]` pin numbers + `u16le[nrows*nch]` sample values (row-major, one row = one sample instant) |
 
-The device writes each whole frame atomically with `usb_cdc.console.write()`. That shares the same CDC endpoint as `print`, so text frames and binary frames are ordered by construction and never interleave.
+The device writes each whole frame atomically with `usb_cdc.data.write()`, the same port that carries the text frames, so the two kinds are ordered by construction and never interleave. Without `boot.py` the fallback writes the whole frame to `usb_cdc.console`, sharing one CDC endpoint with `print`, which preserves the same ordering guarantee.
 
 The host does **byte-level demultiplexing of the mixed stream**: it scans for the `0xAA 'W'` magic; bytes before the magic are framed as text lines as usual, and after the magic the frame is taken by its length field. Text JSON is pure ASCII and never contains `0xAA`, so the magic cannot be mistaken for content. A frame that has not arrived in full is stashed until the next chunk completes it. Binary frames bypass the JSON layer and go straight to the handler registered for their kind.
 
@@ -57,10 +57,11 @@ The host does **byte-level demultiplexing of the mixed stream**: it scans for th
 The device sends one event on startup:
 
 ```json
-{"evt":"ready","app":"PicoHarness","version":"0.1.11-uart",
+{"evt":"ready","app":"PicoHarness","version":"0.1.13-dualcdc",
  "cp":[10,3,1],"pins":29,
  "caps":{"pwm":[...],"adc":[...],"i2c_pairs":[[scl,sda],...],
-         "uart":{"tx":[...],"rx":[...],"pairs":[[tx,rx],...]}}}
+         "uart":{"tx":[...],"rx":[...],"pairs":[[tx,rx],...]},
+         "usb":{"data":true}}}
 ```
 
 | field | meaning |
@@ -72,10 +73,11 @@ The device sends one event on startup:
 | `caps.adc` | Array of pin numbers capable of ADC, including the virtual channel `100` (internal temperature) |
 | `caps.i2c_pairs` | Array of **ordered pairs**, each pair `[SCL, SDA]` |
 | `caps.uart` | `tx` array, `rx` array, and `pairs`, an array of ordered pairs (`[TX, RX]`) |
+| `caps.usb.data` | Whether the protocol runs on its own data port (true once `boot.py` has taken effect) |
 
-`caps` is **probed**, not hardcoded: PWM and ADC are found by trying to build an object on every pin, I2C by exhausting the ordered pairs, UART from the fixed pin table in the RP2350 datasheet. So a different board, or pins claimed by someone else, is reflected in the UI as the board's true capability.
+`caps` is **probed**, not hardcoded: PWM and ADC are found by trying to build an object on every pin, I2C by exhausting the ordered pairs, UART from the fixed pin table in the RP2350 datasheet. So a different board, or pins claimed by someone else, is reflected in the UI as the board's true capability. The sweep runs once at boot and the result is cached; `hello` serves that cache.
 
-On connect, the host first sends `Ctrl+C` and `Ctrl+D` to reset the board into the state where it runs `code.py`, then waits for the `ready` line.
+On connect, the two CDC ports share one VID/PID, so `getInfo()` cannot tell them apart: the host pings each already-authorized port and takes the one that echoes its nonce back as the protocol port (zero clicks). It then sends `hello` to fetch the payload above, without restarting the device. When `hello` is not answered (older firmware) or no port replies, it falls back to the legacy path: send `Ctrl+C` and `Ctrl+D` to a control port to reset the board into the state where it runs `code.py`, then wait for the `ready` line. If the device program restarts while the link is already up (RESET button, or `code.py` saved from Explorer), it broadcasts another `ready`; the UI shows it as "device program restarted" and refreshes the capability table.
 
 ### 2.1 Pin Legality for I2C and UART
 
@@ -95,13 +97,14 @@ The host-side rule:
 
 ## 3. Command Reference
 
-20 commands. Except for `ping` / `echo`, the `data` of a successful reply is normally the state object described in section 4.
+21 commands. Except for `ping` / `echo`, the `data` of a successful reply is normally the state object described in section 4.
 
 ### 3.1 General
 
 | command | arguments | returns |
 | --- | --- | --- |
 | `ping` | none (`t` echoed back) | `{"pong": <t>}` |
+| `hello` | none | `data` = the boot `ready` payload (app/version/cp/pins/caps), so a host that joined after startup can learn the capabilities without rebooting the device |
 | `echo` | anything | The args echoed back verbatim; for self-tests |
 
 ### 3.2 GPIO

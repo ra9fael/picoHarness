@@ -39,19 +39,30 @@ it and it works straight from file://; no server needed. dist/ is git-ignored, d
 
 [Firmware deployment]
 
-The firmware is the single file src/fw/code.py. Deploying means copying it to the root of the
-CIRCUITPY volume (written as G: below):
+The firmware is two files: src/fw/boot.py (enables the second CDC port) and src/fw/code.py (the
+protocol itself). Both are copied to the root of the CIRCUITPY volume (written as G: below):
 
+    cp src/fw/boot.py /g/boot.py
     cp src/fw/code.py /g/code.py
 
 Note:
 
 Writing the file triggers an immediate soft reset; the live Web Serial connection drops, so
 click Connect again in the UI.
+boot.py only takes effect on a hard reset (press RESET or unplug/replug — a Ctrl-D soft reboot does
+not re-run it). After copying boot.py, hard-reset once, otherwise the board still exposes a single
+CDC port and caps.usb.data stays false.
 If a main.py exists in the G: root, CircuitPython never runs code.py (main.py takes priority).
-And do not claim GP0/GP1 or build buses from boot.py.
+boot.py should contain nothing but usb_cdc.enable(...): do not claim GP0/GP1 or build bus objects
+there, because the pin arbiter lives in code.py and boot.py would grab the serial console.
 If G: has no lib/, circup did not install successfully and code.py will fail to start with an
 ImportError.
+
+With dual CDC the board shows up as two COM ports: the console port belongs to CircuitPython
+(banner, print, tracebacks, REPL) and the data port runs this project's JSON-lines protocol and
+binary frames. Both share one VID/PID (0x2E8A:0x000B), so neither Device Manager nor
+navigator.serial.getInfo() can tell them apart — only a nonce ping can. The UI does that
+identification automatically; when debugging by hand, never guess from the COM number.
 
 
 [Type check]
@@ -72,11 +83,21 @@ change to a .ts file, run the command above separately.
 After changing the firmware (code.py), do these in order:
 
 1. Syntax check
-       .venv/Scripts/python.exe -m py_compile src/fw/code.py
+       .venv/Scripts/python.exe -m py_compile src/fw/boot.py src/fw/code.py
 2. Deploy to the board (see above)
-3. Query the device directly with pyserial to confirm the new commands and fields really exist:
-   open COM3 → send \x03 to stop the running program → wait 0.8 s → clear the input buffer →
-   send \x04 to restart code.py → send commands one by one and read the replies.
+3. Query the device directly with pyserial to confirm the new commands and fields really exist.
+   With dual CDC there are two ways to do this, and one is much simpler:
+   - The easy way: run tools/serial_probe.py with no arguments. It discovers both ports by VID/PID,
+     tells them apart with a nonce ping, restarts code.py on the console port, reads the ready
+     broadcast from the data port, then exercises hello / ping / echo.
+   - Hand-written scripts: the port that answers {"cmd":"ping"} with your nonce is the data port
+     (protocol); the other is the console port, which only takes control bytes and REPL statements.
+     Open the data port and keep a reader attached *before* you restart anything — CircuitPython
+     throws CDC output away while no host holds the port, so the boot-time ready broadcast reaches
+     only a reader that is already there. To restart code.py: send \x03 to the console port to stop
+     the running program → wait 0.5 s → send \x04 → the second \x04 covers the case where the first
+     only woke the REPL.
+     REPL statements must end with \r\n; a line ending in \n alone is echoed but never executed.
    Use the python from the venv for the script (pyserial is installed only in .venv; the system
    pip has no network access). Write output via sys.stdout.buffer.write, because a GBK console
    blows up on UTF-8. On startup the device first sends an ANSI/OSC escape that sets the
@@ -90,6 +111,9 @@ After changing the UI, do these in order:
 3. Open dist/index.html in a browser for a DOM smoke test: assert that elements exist, that
    interactions work, and that the console is clean. Most logic can be tested without a board —
    lane binding, drag highlighting and persistence do not depend on the device.
+   Port logic (protocol-port discovery, log port, REPL) can be exercised with a fake
+   navigator.serial: two in-memory FakePorts, one answering pings and one answering only the
+   REPL, covers the whole chain without hardware.
    Clear localStorage when the test ends (keys: picoharness-config-v1, picoharness-scope-v1).
 
 [Troubleshooting criteria]
@@ -98,6 +122,8 @@ The UI sends a new command and the device answers "unknown cmd", or the gpio.sta
 missing a new field, or ready.caps has no uart/i2c_pairs — that is not a frontend bug, it means
 G:\code.py is still the old version. Compare the VERSION string in the device-side code.py with
 the source and copy the file once more.
+Only one COM port appears, or ready.caps.usb.data is false — G:\boot.py was not copied, or the
+board was not hard-reset afterwards (Ctrl-D does not count).
 
 [Firmware implementation notes]
 
@@ -107,17 +133,22 @@ wrapped with create_task first and the handles are then awaited via gather(t1, t
 in this mpy port accepts Task objects only; passing bare coroutines trips a "missing await"
 assertion inside sleep_ms.
 
-Three constraints established on real hardware, known before touching the scheduler:
+Four constraints established on real hardware, known before touching the scheduler:
 
 1. sys.stdin.read(1) blocks until at least one byte arrives. It is not the non-blocking
    "returns None when empty" idiom. Ungated, command_reader freezes the whole event loop on its
    very first step and every sibling task starves (that was the real cause of the ADC showing no
-   readings). Correct form: register stdin with select.poll() and gate each read with
-   while poll(0):.
+   readings). The data port behaves the same way: gate on in_waiting before read() and set
+   DATA.timeout = 0. The single-port fallback still registers stdin with select.poll() and gates
+   each read with while poll(0):.
 2. busio.UART defaults to timeout=1000 ms, so a single empty read stalls the cooperative loop.
    Buses are created with timeout=0.
 3. On USB CDC, print(..., flush=True) raises OSError [Errno 22] after every write (the text still
    goes out). Do not flush explicitly.
+4. usb_cdc.Serial is a binary stream: read() returns bytes and write() takes a bytes-like, while
+   sys.stdin is a text object. Whenever one code path feeds both, decode with
+   decode("utf-8", "replace") first — otherwise the same buffer raises TypeError and, on the
+   fallback path, splits multi-byte characters.
 
 Also: writing .frequency on an rp2 fixed-frequency PWMOut raises Invalid variable_frequency, so the
 firmware deinits and rebuilds the object when the frequency changes. The mpy asyncio port is a

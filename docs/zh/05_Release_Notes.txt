@@ -4,6 +4,30 @@ PicoHarness 版本说明
 界面与固件要配套：旧固件收不到新命令，会回 "unknown cmd"。
 
 
+[20261012 0.1.13-dualcdc]
+
+固件改双 CDC 拓扑：boot.py 里 usb_cdc.enable(console=True, data=True)，
+code.py 的 JSON 行协议与二进制帧走 data 口，console 口还给 CircuitPython 自己
+（开机横幅、print、异常回溯、REPL）。
+
+新增 hello 命令：应答与开机 ready 广播同一份载荷。caps 只在开机时探测一次并缓存
+（I2C 穷举慢），后接入的主机不再需要重启设备即可拿到版本与能力表。
+
+上位机用 nonce ping 认口：两个 CDC 口共用同一 VID/PID，getInfo() 区分不了，
+只有应答里带回随机数的那个是 code.py。已授权端口逐个探测，重连零点击。
+
+控制台新增"连接日志口"按钮：按需再接一个 console 口，设备 print/异常实时镜像；
+进入 REPL 只动 console 口，协议链路不再被打断。
+
+兼容回落保留一个版本：G: 上没有 boot.py 时 usb_cdc.data 为 None，固件回单口；
+上位机 hello 失败即走"重启设备等 ready 广播"的老路径。
+
+两条真机约束：boot.py 只有硬复位才生效（Ctrl-D 软重启不会重跑它）；
+CircuitPython REPL 收 \r\n，只给 \n 的行会被回显但永不执行。
+
+固件与界面分开提交（feat(fw)、feat(ui)）。
+
+
 [20261011 0.1.11-uart]
 
 UART 总线泳道落地：TX/RX 槽、波特率、写读事务台。

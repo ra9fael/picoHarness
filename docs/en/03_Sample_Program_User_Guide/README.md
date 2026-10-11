@@ -200,8 +200,9 @@ Board A GND     ──── Board B GND     ← this wire is mandatory
 
 **Steps**:
 
-1. Copy `code.py` onto both boards and plug each into its own USB port.
-2. Open two browser tabs and connect one COM port to each.
+1. Copy `boot.py` and `code.py` onto both boards, hard-reset each once, and plug them into their own USB port.
+2. Open two browser tabs. Each tab's picker lists the entries of that board (two per board); authorize and connect, and the
+   page works out which of the two is the data port.
 3. Create a UART bus on both sides. Using GP6/GP7 on both is fine; they are separate hardware.
 4. Switch both to their `UART #` tab. Type on one side and read on the other.
 
@@ -218,7 +219,8 @@ This is the most common failure in board-to-board work, and the symptom is "I do
 
 **Steps**:
 
-1. Switch the console mode to REPL.
+1. Switch the console mode to REPL. The page sends Ctrl+C on the **console port** (it attaches that port itself if you have not
+   opened it by hand), and verifies the `>>>` prompt from the console output. The data port stays open the whole time.
 2. The device soft-resets into the friendly REPL first. What you type goes into stdin unchanged, and output appears on screen unchanged.
 3. Switching back to Monitor sends Ctrl+D. `code.py` runs again, the handshake repeats, and the function state is restored from localStorage.
 
@@ -251,11 +253,13 @@ Work through these in order; any one of them may fix it outright.
 
 1. **Another tab still holds the port.** Web Serial allows one owner per COM port, so close the other browser tabs and retry.
 2. **The device is not in the port picker.** Hold BOOTSEL and replug to confirm you can reach UF2,
-   or check Device Manager for the COM number: a different USB port means a different number.
-3. **The board is sitting in the friendly REPL.** `code.py` does not run when it has a syntax error, and the serial output shows the
-   error message. Read it in REPL mode, or press Ctrl+D to see what failed.
-4. **Another program owns the serial port.** Serial monitors, `mpremote`, and editor plugins all take a COM port exclusively.
-5. **Handshake times out but the board is alive.** On startup the device emits an ANSI/OSC escape sequence that sets the terminal
+   or check Device Manager for the COM numbers: a different USB port means different numbers, and a dual-CDC board lists two.
+3. **"No protocol port found", but the board is alive.** You authorized only one of the two ports, or `boot.py` never took
+   effect (no hard reset). Both entries of the board must be authorized; the page cannot tell them apart by name, only by ping.
+4. **The board is sitting in the friendly REPL.** `code.py` does not run when it has a syntax error, and the traceback appears on
+   the **console port** (the data port stays silent). Read it in REPL mode, or press Ctrl+D to see what failed.
+5. **Another program owns the serial port.** Serial monitors, `mpremote`, and editor plugins all take a COM port exclusively.
+6. **Handshake times out but the board is alive.** On startup the device emits an ANSI/OSC escape sequence that sets the terminal
    title, and it sticks to the front of the `ready` JSON. The host app locates the `{` and cuts it away. If you write your own host
    script, handle it as well, otherwise you will think JSON parsing failed.
 

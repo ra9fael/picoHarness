@@ -2,13 +2,16 @@
 
 这篇是速查手册，不是教程。想知道怎么用先看 [01 使用手册](../01_GUIApp_FW_Manual/README.md)。
 
-固件版本 0.1.11-uart 的全部对外接口。
+固件版本 0.1.13-dualcdc 的全部对外接口。
 
 ---
 
 ## 1. 传输层
 
-一条串口字节流，两种帧。
+一条串口字节流，两种帧。这条流跑在 `usb_cdc.data` 口上（由 `boot.py` 的
+`usb_cdc.enable(console=True, data=True)` 打开）；`console` 口归 CircuitPython 自己，
+只出横幅、`print`、异常回溯和 REPL，不再有协议字节。板子上没有 `boot.py` 时
+`usb_cdc.data` 为 `None`，协议回落到唯一那个 CDC 口，帧格式不变。
 
 ### 1.1 文本帧（JSON-lines）
 
@@ -45,8 +48,9 @@ payload 第一个字节是 **kind**，标识这是哪种流：
 | --- | --- | --- |
 | 1 | ADC 波形批次 | `struct.pack("<BBHH", 1, nch, ms, nrows)` + `u16le[nch]` 引脚号 + `u16le[nrows*nch]` 采样值（行主序，一行=一个采样时刻） |
 
-设备端用 `usb_cdc.console.write()` 一次性原子写出整帧，和 `print` 走同一个 CDC 端点，
-所以文本帧和二进制帧天然保序，不会交错。
+设备端用 `usb_cdc.data.write()` 一次性原子写出整帧，和文本帧走同一个端口，
+所以两种帧天然保序，不会交错。没有 `boot.py` 时回落到单口：整帧写 `usb_cdc.console`，
+与 `print` 共用同一个 CDC 端点，保序性不变。
 
 主机侧做**字节级混流解析**：扫 `0xAA 'W'` 魔数，魔数之前的字节照常按文本行分帧，
 之后按长度取整帧。文本 JSON 是纯 ASCII，永远不含 `0xAA`，所以魔数不会被误认。
@@ -62,10 +66,11 @@ payload 第一个字节是 **kind**，标识这是哪种流：
 设备启动时主动发一条事件：
 
 ```json
-{"evt":"ready","app":"PicoHarness","version":"0.1.11-uart",
+{"evt":"ready","app":"PicoHarness","version":"0.1.13-dualcdc",
  "cp":[10,3,1],"pins":29,
  "caps":{"pwm":[...],"adc":[...],"i2c_pairs":[[scl,sda],...],
-         "uart":{"tx":[...],"rx":[...],"pairs":[[tx,rx],...]}}}
+         "uart":{"tx":[...],"rx":[...],"pairs":[[tx,rx],...]},
+         "usb":{"data":true}}}
 ```
 
 | 字段 | 含义 |
@@ -77,12 +82,18 @@ payload 第一个字节是 **kind**，标识这是哪种流：
 | `caps.adc` | 能做 ADC 的脚号数组，含虚拟通道 `100`（内部温度） |
 | `caps.i2c_pairs` | **有序对**数组，每对是 `[SCL, SDA]` |
 | `caps.uart` | `tx` 数组、`rx` 数组、`pairs` 有序对数组（`[TX, RX]`） |
+| `caps.usb.data` | 协议是否跑在独立的 data 口上（`boot.py` 生效即为 true） |
 
 `caps` 是**探测出来的**，不是硬编码：PWM/ADC 靠逐脚试建对象，I2C 靠穷举有序对试建，
 UART 用 RP2350 数据手册的固定引脚表。所以换板子、脚被占用，界面会自动反映真实能力。
+探测只在开机时做一次并缓存，`hello` 复用的就是这份缓存。
 
-主机连接时的动作：先发 `Ctrl+C`、`Ctrl+D` 把板子复位到运行 `code.py` 的状态，
-再等 `ready` 行。
+主机连接时的动作：两个 CDC 口共用同一 VID/PID，`getInfo()` 区分不了，所以逐个已授权端口
+发 `ping` 并核对回带 nonce 的那个才是协议口（零点击）；对上后发 `hello` 取上面这份载荷，
+不必重启设备。`hello` 不被应答（旧固件）或端口无应答时，回落到老路径：
+向控制口发 `Ctrl+C`、`Ctrl+D` 把板子复位到运行 `code.py` 的状态，再等 `ready` 行。
+设备程序在链路建立之后自己重启时（按 RESET、或从资源管理器保存 `code.py`），会再广播一条
+`ready`，界面把它当作"设备已重启"提示并刷新能力表。
 
 ### 2.1 关于 I2C 和 UART 的合法性
 
@@ -105,13 +116,14 @@ UART 用 RP2350 数据手册的固定引脚表。所以换板子、脚被占用�
 
 ## 3. 命令总表
 
-20 条。除 `ping` / `echo` 外，成功的应答 `data` 通常就是第 4 节那份 state 对象。
+21 条。除 `ping` / `echo` 外，成功的应答 `data` 通常就是第 4 节那份 state 对象。
 
 ### 3.1 通用
 
 | 命令 | 参数 | 返回 |
 | --- | --- | --- |
 | `ping` | 无（原样回带 `t`） | `{"pong": <t>}` |
+| `hello` | 无 | `data` = 开机 `ready` 的那份载荷（app/version/cp/pins/caps），供后接入的主机免重启取能力 |
 | `echo` | 任意 | 原样回带 args，用于自检 |
 
 ### 3.2 GPIO

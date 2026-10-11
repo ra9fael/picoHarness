@@ -5,6 +5,35 @@ repository commit. UI and firmware must be used as a matched pair: an old firmwa
 recognise new commands and answers "unknown cmd".
 
 
+[20261012 0.1.13-dualcdc]
+
+The firmware moved to a dual CDC topology: boot.py calls usb_cdc.enable(console=True, data=True),
+so the JSON-lines protocol and the binary frames run on the data port while the console port goes
+back to CircuitPython itself (boot banner, print, tracebacks, REPL).
+
+Added the hello command: it answers with the same payload as the boot-time ready broadcast. Caps
+are probed once at boot and cached (the I2C sweep is slow), so a host that joins later no longer
+has to restart the device to learn the version and capability table.
+
+The host now identifies the protocol port with a nonce ping: both CDC ports share one VID/PID and
+getInfo() cannot tell them apart, so the only port that answers is the one running code.py. Already
+authorized ports are probed in turn, which makes a reconnect cost zero clicks.
+
+The console gained an "attach log port" button: it opens the console port on demand so device
+print output and tracebacks are mirrored live, and entering the REPL touches only that port —
+the protocol link stays up.
+
+A single-port fallback is kept for one release: without boot.py on G:, usb_cdc.data is None and the
+firmware stays on one port; when hello fails, the host falls back to restarting the device and
+waiting for its broadcast ready line.
+
+Two constraints measured on hardware: boot.py only takes effect on a hard reset (a Ctrl-D soft
+reboot does not re-run it), and the CircuitPython REPL wants \r\n — a line ending in \n alone is
+echoed but never executed.
+
+Firmware and UI were committed separately (feat(fw), feat(ui)).
+
+
 [20261011 0.1.11-uart]
 
 UART bus lanes landed: TX/RX slots, baud rate, and a write/read transaction desk.

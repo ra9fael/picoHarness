@@ -11,7 +11,10 @@ For protocol details see [02 Protocol Reference](../02_Library_User_Guide/README
 One Pico board plus one web page make a desktop test fixture.
 
 - The PC-side deliverable is a **single HTML file**. Double-click it and you are working: no Python, no drivers, no local server.
-- The page connects to the Pico's USB serial port through the browser's **Web Serial API**.
+- The page connects to the Pico's USB serial ports through the browser's **Web Serial API**.
+  The board exposes two CDC ports: the data port carries the JSON protocol between the page and the
+  board, the console port stays CircuitPython's own (`print`, tracebacks, REPL). The page works out
+  which is which on its own — you never have to guess a COM number.
 - The board runs one CircuitPython `code.py`. It receives JSON commands, drives pins, and pushes readings back.
 
 What you can do: switch pins, measure voltage, generate PWM, scan an I2C bus, and send UART, plus a scope panel and a debug console you can type into.
@@ -52,14 +55,21 @@ If you would rather not install circup, download the [Library Bundle](https://ci
 
 ### 2.3 Deploy the Firmware
 
-Copy `src/fw/code.py` from this repository into the root of the CIRCUITPY volume, overwriting the file of the same name.
+The firmware is two files; copy both into the root of the CIRCUITPY volume, overwriting files of the same name:
+
+- `src/fw/boot.py` does exactly one thing — `usb_cdc.enable(console=True, data=True)` — which splits the USB serial into a
+  "console" port and a "data" port.
+- `src/fw/code.py` is the fixture itself. It receives JSON commands, drives pins, and pushes readings back.
+
+`boot.py` **only takes effect after a hard reset**: press the board's RESET button, or unplug and replug the USB cable. A
+Ctrl-D soft reboot does not re-run it, so hard-reset once after copying — Device Manager showing two COM ports means it worked.
 
 If the root contains a `main.py`, delete it or rename it: CircuitPython runs `main.py` and would never touch `code.py`.
 
 When the copy finishes, the board reboots and starts running. This step installs nothing on the PC.
 
 > Every later change to `code.py` is the same move: copy it over and the board reboots itself.
-> The reboot drops the browser's serial connection, so reconnect.
+> The reboot drops the browser's serial connection, so reconnect. Changing `boot.py` needs one extra step: a hard reset.
 
 ---
 
@@ -68,8 +78,18 @@ When the copy finishes, the board reboots and starts running. This step installs
 Take `dist/index.html` (see [04 Build Guide](../04_FW_Build_Guide.txt) for how to build it yourself) and open it in Chrome or Edge
 by double-clicking. It works straight from `file://`; you do not need a local server.
 
-Click **Connect** at the top of the page. The browser opens a port picker; select your board. It usually shows up as
-`USB Serial Device`, or as an entry carrying the `2E10` vendor ID.
+Click **Connect** at the top of the page. Both CDC ports share one vendor/product ID, so the browser cannot name them and
+the page identifies them by asking: it pings each authorized port and keeps the one that echoes back its nonce — that is the
+data port.
+
+- First time: the browser opens a port picker. Select **every** entry of the board (usually shown as
+  `USB Serial Device`, or as entries carrying the `2E8A` vendor ID — a dual-CDC board lists two), so the page is authorized
+  for both and the picker never appears again.
+- Later visits: reconnection costs zero clicks, the ports are already authorized.
+- If the device program is not running (stopped at the REPL, or crashed): the page sends `Ctrl+C` + `Ctrl+D` on the other
+  port to kick it back to life, then looks for the protocol port again.
+
+The handshake reads the board's capability table with the `hello` command, so the device program does not have to restart.
 
 After a successful connection:
 
@@ -183,7 +203,8 @@ On the card you pick the baud rate, type hex bytes to send, and read back a byte
 ### 4.7 Live UART Terminal
 
 The Read button on a card is too clumsy for streaming serial data. So the console area has a row of tabs above it: **Console** is
-the raw serial mirror, and each UART you configure adds a tab such as **UART #0** or **UART #1**.
+the device output mirror (the raw bytes of the data port, or of the console port once you attach a log port), and each UART you
+configure adds a tab such as **UART #0** or **UART #1**.
 
 Open a UART tab:
 
@@ -234,11 +255,19 @@ jump around and the two displays never disagree.
 
 The bottom of the page holds the console, in two modes:
 
-- **Monitor**: read-only, mirrors everything the board pushes out of its serial port. Use it for errors and `print` output.
+- **Monitor**: read-only, mirrors the bytes the device pushes out. Without a log port this is the data port, so protocol lines
+  and the device's own `print` output arrive mixed; once a log port is attached it mirrors the console port instead, where the
+  banner, `print` and tracebacks live, and the protocol chatter stops scrolling past your eyes.
 - **REPL**: writable, your keystrokes pass straight through to the board's CircuitPython prompt. Use it to try a snippet on the spot.
 
-A button switches modes. When you switch to REPL, any open UART tab yields to Console automatically, because the board's REPL and
-our data stream fight over the same serial port. Switching back to Monitor re-runs the handshake.
+The **Attach log port** button opens that console port, on demand, once: the page probes the authorized ports and takes the one
+that never answers a protocol ping. Afterwards the button greys out and reads "Log port attached"; it can only be re-picked after
+disconnecting the device.
+
+A button switches modes. When you switch to REPL, any open UART tab yields to Console automatically, because the board's REPL
+lives on the console port and one port allows only one owner. With dual CDC the REPL touches only that port: the data port stays
+open, so leaving the REPL needs no port picker and no reconnect. Switching back to Monitor restarts the device program and
+re-runs the handshake (the board's volatile configuration is cleared; the page immediately re-applies it).
 
 Three action buttons: clear, copy all, export as a txt file.
 
@@ -269,6 +298,8 @@ These are traps already stepped in, collected here to save your time.
 | UART cannot use GP0/GP1 | Claimed by the CircuitPython console; already excluded from the capability table. |
 | UART pins are fixed | Only certain pins can be TX or RX, and for full duplex both pins must be on the same UART. |
 | Copying code.py reboots the board | The browser's serial connection drops, so you have to reconnect. |
+| Changing boot.py needs a hard reset | Press RESET or replug. A Ctrl-D soft reboot does not re-run boot.py, so the board still shows one port. |
+| The two COM ports are indistinguishable by name | They share one VID/PID, so the page identifies them with a nonce ping. When debugging by hand, send `{"cmd":"ping"}` and see which port answers. |
 | Swapping boards | The capability table is probed, so the UI adapts on its own. No code changes needed. |
 
 ---
@@ -279,11 +310,17 @@ Check these in order.
 
 1. **Is the board powered?** Is the CIRCUITPY volume there? If not, reflash the UF2.
 2. **Is code.py at the root?** The file must be named `code.py` and must sit in the root directory, not a subdirectory.
-3. **Is asyncio installed?** Open a serial terminal and read the board's output. `ImportError: no module named 'asyncio'`
-   means the library is missing; go back to section 2.2.
-4. **Right browser?** It must be desktop Chrome or Edge. Firefox and Safari do not support Web Serial.
-5. **Is the port already claimed?** If Thonny, mpremote, or another serial tool holds the COM port, close it first.
-6. **No port picker appears?** Did you click "Connect"? Is there a blocked permission prompt on the right of the address bar?
+3. **Is boot.py there, and did you hard-reset?** A single CDC port means dual CDC never came up: press RESET
+   (or replug) and check Device Manager for two COM ports.
+4. **Is asyncio installed?** Open a serial terminal on the **console port** and read the board's output.
+   `ImportError: no module named 'asyncio'` means the library is missing; go back to section 2.2.
+5. **Right browser?** It must be desktop Chrome or Edge. Firefox and Safari do not support Web Serial.
+6. **Did you authorize both ports?** Select every entry of the board in the picker, otherwise the log port and the REPL
+   cannot be attached and the page can only recover by kicking the device program.
+7. **Is the port already claimed?** If Thonny, mpremote, or another serial tool holds either COM port, close it first.
+8. **No port picker appears?** Did you click "Connect"? Is there a blocked permission prompt on the right of the address bar?
+9. **"No protocol port found"?** The device program is not running and does not answer the kick. Enter the REPL on the
+   console port and type `import code` by hand to see the real error.
 
 Still stuck? Open the error lookup in [03 Example Workflows](../03_Sample_Program_User_Guide/README.md), or attach a serial tool
 and read what the board sends.
