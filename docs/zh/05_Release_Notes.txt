@@ -1,0 +1,138 @@
+PicoHarness 版本说明
+
+固件版本号写在 code.py 的 VERSION 常量里；上位机版本以仓库提交为准。
+界面与固件要配套：旧固件收不到新命令，会回 "unknown cmd"。
+
+
+[20261011 0.1.11-uart]
+
+UART 总线泳道落地：TX/RX 槽、波特率、写读事务台。
+
+控制台新增 UART 实时终端标签页，每路总线一个，键盘直接发字节，
+支持 HEX 与文本渲染切换。清屏/复制/导出按钮跟随当前可见标签。
+
+UART RX 改为事件流（订阅主题 uart.<id>），空读不再阻塞调度。
+
+修复：busio.UART 默认 1000 ms 读超时会让整个协作式事件循环冻住，
+建总线时显式设 timeout=0，手动读取用 200 ms 有界等待并在读后恢复。
+
+修复：GP0/GP1 被 CircuitPython 串口控制台占用，探测表已将其从
+caps.uart 中剔除，避免界面上选了必定失败的引脚对。
+
+修复：每次新握手清除总线卡片的 live/rejected 闩锁。此前重刷固件后
+设备易失配置丢失，而旧闩锁会让界面永久跳过该总线、不再重发配置。
+
+I2C 与 UART 泳道分别提交（feat(i2c)、feat(uart)）。
+
+
+[20261010 0.1.7-i2c]
+
+I2C 原始总线事务泳道：i2c.cfg / i2c.scan / i2c.xfer / i2c.release，
+支持纯写、纯读、repeated-start 写读三种事务。
+
+固件启动时穷举合法 SCL/SDA 有序对，暴露为 caps.i2c_pairs；
+界面按角色高亮可放槽，非法拖拽直接拒绝。
+
+rp2 PIO I2C 合法性规则确认为：SCL 取奇数 GP，SDA 取偶数 GP，
+且 SDA ≡ SCL−1 (mod 4)。"No pull up found" 属接线问题，与引脚选择无关。
+
+多脚总线接入方式：FunctionDef 增加可选 renderLane 钩子，总线泳道自渲染卡片；
+配置持久化新增 buses[]。
+
+
+[20261010 0.1.6-temp-sub]
+
+新增内部温度虚拟通道（线上引脚号 100）。本 build 不暴露
+board.TEMPERATURE_SENSOR，改由 microcontroller.cpu.temperature 反演
+16 位等效 raw，从而完全复用既有 u16 遥测管线。
+
+新增 MQTT 式事件订阅 sub/unsub（含保留值快照）。
+主题 gpio.in 严格门控，adc.<pin> 只调每通道死区（ADC 无轮询兜底，不门控）。
+
+示波器面板重写：通道颜色按引脚稳定分配；滚轮按光标处采样点锚定缩放；
+拖拽平移；十字标线与读数框；Roll / FIFO 双采集模式与可选深度；
+二进制帧引入 kind 注册表，新增遥测流只需注册解析器。
+
+
+[20261010 0.1.5-binstream]
+
+adc.stream 支持 fmt=bin，用 struct 帧传输（0xAA 'W' + u16le 长度 + payload），
+单次原子写入 usb_cdc。JSON 一律用紧凑分隔符，同体积省约 15%。
+
+上位机改为字节级混流解析，能同一串口流里分开 ASCII 行与二进制帧。
+
+ADC 芯片读数加 EMA 平滑与 250 ms 定时刷新；示波器加轴单位与 k·x+b 校正。
+
+
+[20261010 0.1.4-adcstream]
+
+新增 adc.stream / adc_streamer 批量波形帧，流开启期间死区事件静音。
+示波器面板（可折叠，4 通道，2048 点环形缓冲，rAF 重绘，选择与折叠状态持久化）。
+
+修复：三通道并发下的界面卡顿。实测固件与协议层不慢
+（0 通道 RTT 中位 11 ms，3 通道 19 ms，零超时），
+根因是逐事件渲染，已由批量帧 + 单帧重绘消除。
+
+
+[20261010 0.1.3-stdinpoll]
+
+修复：sys.stdin.read(1) 会阻塞直到有字节到达，此前 command_reader 第一步就冻住
+整个事件循环，所有兄弟 monitor 永远得不到步进。现用 select.poll() 门控 stdin，
+并按官方指南用任务句柄 gather。
+
+修复：mpy 下 gather 对裸协程的顺序 await 问题；gather 只收 Task 对象。
+
+PWM 频率编辑器重做为"数值预设 × 单位预设"组合，浮点安全持久化。
+
+已知设备侧限制：rp2 固定频 PWMOut 改 .frequency 会抛 Invalid variable_frequency，
+固件改为频率变化时重建对象；频率只收整数 Hz，下限约 7.4 Hz。
+USB CDC 上 print(flush=True) 每次抛 OSError [Errno 22]（文本已出），故不 flush。
+
+
+[20261010 0.1.0-adc / 0.1.1-montdbg]
+
+新增 ADC 读取泳道：adc.cfg / adc.stop，100 ms 采样、约 0.5% 死区变化推送。
+显示以电压为主，可切原始值；格式选择随配置持久化。
+
+新增 dbg 事件上报各 monitor 任务的存活与异常（此前 gather 会吞掉已死任务，
+故障时表现为静默）。引脚模型扩到 29 脚，ADC 显示在 V/mV/raw 间循环。
+
+
+[20261009 0.0.9-nbstdin]
+
+命令读取改非阻塞，修复"回答应等到下一次请求才出现"。
+
+界面新增控制台复制/导出；PWM 频率预设下拉；工作台配置存入浏览器 localStorage，
+连接后静默恢复并靠漂移对账自愈。
+
+
+[20261009 0.0.8-async]
+
+固件改 asyncio 主循环，gpio_in 边沿事件 50 ms 推送
+（CircuitPython 不内置 asyncio，需 circup install asyncio）。
+
+上位机输入电平改为事件驱动，轮询降为 1 s 对账自愈。
+
+
+[20261009 0.0.7-arbiter]
+
+固件加命令分发表与引脚所有权裁决（claim/release，PWM 抢占可 force）。
+
+上位机分层重构：transport / rpc / model / workbench，
+功能以 FunctionDef 注册，新增总线功能只需写 def 并注册。
+
+
+[20261009 0.0.6-wb]
+
+IO 分配工作台（引脚池 + 功能泳道，拖拽或点选绑定，占用自动顶位）。
+调试控制台集成 xterm.js，中英双语。
+
+更早的历史不在本篇范围：项目以 PicoJig 为蓝本，改为 CircuitPython +
+浏览器 Web Serial 直连 USB CDC 的单文件上位机。
+
+
+[路线图未做项]
+
+设备端 config.json 上电自恢复。
+SPI 总线泳道（需支持 CS 引脚）。
+独立错误面板。

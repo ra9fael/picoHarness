@@ -1,0 +1,116 @@
+PicoHarness 构建说明
+
+本篇讲怎么从源码做出交付物、怎么部署到板子、以及改完代码怎么验证。
+使用方式见 "01_GUIApp_FW_Manual"，接口定义见 "02_Library_User_Guide"。
+
+
+[前提条件]
+
+以下版本已验证可用：
+
+Node.js：24.18.0
+npm：随 Node 附带
+浏览器：桌面版 Chrome 或 Edge（需要 Web Serial API）
+开发板：Raspberry Pi Pico 2（rp2350a）
+设备固件：CircuitPython 10.3.1（board_id：raspberry_pi_pico2）
+
+仓库依赖只有 esbuild、typescript 和两个前端运行时（xterm.js）。安装：
+
+    npm install
+
+设备侧需要一个 asyncio 实现（CircuitPython 不内置）。用 circup 装到板子的 lib 目录：
+
+    circup install asyncio
+
+装完 CIRCUITPY 卷下应存在 lib/asyncio/ 与 lib/adafruit_ticks.mpy。
+以后动设备库一律走 circup，不要手工拷贝。
+
+
+[交付物构建]
+
+    npm run build
+
+产物是单文件 dist/index.html（JS/CSS 全部内联，约 400 KB），双击即可在 file:// 下使用，
+不需要起服务器。dist/ 已被 git 忽略，不要提交。
+
+
+[固件部署]
+
+固件是单文件 src/fw/code.py，部署就是把它拷到 CIRCUITPY 卷根目录（下文记作 G:）：
+
+    cp src/fw/code.py /g/code.py
+
+注意：
+
+写入后板子立即软复位，正在连接的 Web Serial 会掉线，需要在界面重新点 Connect。
+G: 根目录若存在 main.py，CircuitPython 就不会再运行 code.py（main.py 优先级更高）。boot.py 里也别占 GP0/GP1 或提前建总线。
+G: 上没有 lib/ 时说明 circup 没装成功，code.py 会以 ImportError 起不来。
+
+
+[类型检查]
+
+仓库里没有 tsconfig.json。直接跑 npx tsc 会报 TS5058，必须显式给参数：
+
+    npx -p typescript tsc --noEmit --strict \
+        --module esnext --target es2020 --moduleResolution bundler \
+        --lib es2020,dom --skipLibCheck src/ui/main.ts
+
+npm run build 走的是 esbuild，它只做打包，不做类型检查。改过 .ts 一定要单独跑上面这条。
+
+
+[验证链]
+
+改固件（code.py）后按顺序做：
+
+1. 语法检查
+       .venv/Scripts/python.exe -m py_compile src/fw/code.py
+2. 部署到板子（见上）
+3. 用 pyserial 直接问设备，确认新命令和字段真的在：
+   打开 COM3 → 发 \x03 停掉当前程序 → 等 0.8 s → 清输入缓冲 → 发 \x04 重启 code.py
+   → 逐条发命令读应答。
+   脚本要用 venv 里的 python（pyserial 只装在 .venv，系统 pip 不通网）。
+   输出走 sys.stdout.buffer.write，GBK 控制台打印 UTF-8 会炸。
+   设备启动会先发一段设置终端标题的 ANSI/OSC 转义，粘在 ready JSON 前面且不带换行，
+   脚本要用正则剥离或按花括号定位提取。
+
+改界面前按顺序做：
+
+1. 类型检查（见上）
+2. npm run build
+3. 浏览器打开 dist/index.html 做 DOM 冒烟：断言元素存在、交互生效、控制台无报错。
+   没板子也能测大部分逻辑——泳道绑定、拖拽高亮、持久化都不依赖设备。
+   测试结束记得清 localStorage（key：picoharness-config-v1、picoharness-scope-v1）。
+
+[排障判据]
+
+界面发了新命令、设备回 "unknown cmd"，或者 gpio.state 应答里缺新字段、
+ready.caps 里没有 uart/i2c_pairs —— 这不是前端 bug，是 G:\code.py 还是旧版本。
+先比对设备端 code.py 里的 VERSION 字符串与源码，重新拷一次即可。
+
+[固件实现要点]
+
+主循环是 asyncio 任务组：command_reader 读 stdin、gpio_monitor 边沿推送、adc_monitor 死区推送、
+adc_streamer 波形批量流。每个协程先 create_task 拿到 Task 句柄，再 await gather(t1, t2, ...)。
+该 mpy 端口的 gather 只接受 Task 对象，塞裸协程会在 sleep_ms 处触发 "missing await" 断言。
+
+三条真机实测出来的约束，动调度之前务必知道：
+
+1. sys.stdin.read(1) 会阻塞直到至少一个字节到达，它不是"无数据返回 None"的非阻塞惯用法。
+   不加门控时 command_reader 第一步就冻结整个事件循环，所有兄弟 monitor 永远得不到步进
+   （这正是当初 ADC 读不到数的根因）。正确做法：select.poll() 注册 stdin，
+   每次读取前用 while poll(0): 门控。
+2. busio.UART 默认 timeout=1000 ms，一次空读就能把协作式循环整段卡住；建总线时显式 timeout=0。
+3. USB CDC 上 print(..., flush=True) 每次写完抛 OSError [Errno 22]（文本已正常输出），不要显式 flush。
+
+另外：rp2 固定频率模式的 PWMOut 写 .frequency 会抛 Invalid variable_frequency，
+固件改成频率变化时 deinit 重建。mpy 的 asyncio 端口本身是队列轮转调度器，
+create_task 并发没有缺陷（早前"gather 按顺序 await 饿死子任务"的诊断已被真机证伪）。
+
+界面侧的分层与依赖方向见仓库 README 的"架构"一节，这里不重复。
+一条硬约束：层间依赖单向向下，workbench/ 下每个功能是一个 FunctionDef 插件，
+新增总线功能 = 写 def(+driver) 并注册进 defs 数组，同时在固件 COMMANDS 表里注册命令。
+
+[提交约定]
+
+git commit 标题一律用 type(scope): subject，例如 feat(uart): ...、fix(fw): ...。
+固件版本号写在 code.py 的 VERSION 常量里，随功能变更一起提升。

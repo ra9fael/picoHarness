@@ -1,0 +1,158 @@
+PicoHarness Release Notes
+
+The firmware version is written in the VERSION constant of code.py; the host version is the
+repository commit. UI and firmware must be used as a matched pair: an old firmware does not
+recognise new commands and answers "unknown cmd".
+
+
+[20261011 0.1.11-uart]
+
+UART bus lanes landed: TX/RX slots, baud rate, and a write/read transaction desk.
+
+Added a live UART terminal tab in the console, one per bus; keystrokes send bytes directly, with
+a HEX/text rendering toggle. The clear/copy/export buttons follow the currently visible tab.
+
+UART RX moved to an event stream (subscribe to the topic uart.<id>); empty reads no longer block
+the scheduler.
+
+Fix: busio.UART's default 1000 ms read timeout could freeze the whole cooperative event loop.
+Buses are now created with timeout=0 explicitly, manual reads use a 200 ms bounded wait and are
+restored to non-blocking afterwards.
+
+Fix: GP0/GP1 are occupied by the CircuitPython serial console; the probe table now excludes them
+from caps.uart, so the UI cannot offer a pin pair that is guaranteed to fail.
+
+Fix: every new handshake clears the live/rejected latches of the bus cards. Previously, after a
+firmware reflash the device lost its volatile configuration while stale latches made the UI skip
+that bus forever and never resend its configuration.
+
+I2C and UART lanes were committed separately (feat(i2c), feat(uart)).
+
+
+[20261010 0.1.7-i2c]
+
+I2C raw bus transaction lanes: i2c.cfg / i2c.scan / i2c.xfer / i2c.release, supporting
+write-only, read-only and repeated-start write-then-read transactions.
+
+The firmware now exhausts the legal SCL/SDA ordered pairs at startup and exposes them as
+caps.i2c_pairs; the UI highlights droppable slots by role and rejects illegal drags outright.
+
+The rp2 PIO I2C legality rule is confirmed: SCL takes an odd GP, SDA an even GP, and
+SDA ≡ SCL−1 (mod 4) must hold. "No pull up found" is a wiring issue, unrelated to pin selection.
+
+Multi-pin buses were integrated by adding an optional renderLane hook to FunctionDef; a bus lane
+renders its own card. Configuration persistence gained buses[].
+
+
+[20261010 0.1.6-temp-sub]
+
+Added the internal temperature virtual channel (wire pin number 100). This build does not expose
+board.TEMPERATURE_SENSOR, so microcontroller.cpu.temperature is inverted into a 16-bit equivalent
+raw value, which lets temperature reuse the existing u16 telemetry pipeline completely.
+
+Added MQTT-style event subscription sub/unsub (with retained snapshots). Topic gpio.in is
+strictly gated; adc.<pin> only tunes the per-channel deadband (ADC has no polling fallback, so it
+is not gated).
+
+Rewrote the scope panel: channel colors are assigned stably per pin; wheel zoom anchors on the
+sample under the cursor; drag to pan; crosshair with a readout box; Roll / FIFO capture modes
+with optional depth; binary frames gained a kind registry, so adding a telemetry stream only
+requires registering its parser.
+
+
+[20261010 0.1.5-binstream]
+
+adc.stream supports fmt=bin, transmitted as struct frames (0xAA 'W' + u16le length + payload)
+written to usb_cdc in a single atomic write. JSON now uses compact separators, saving about 15%
+for the same content.
+
+The host switched to byte-level demultiplexing of the mixed stream, separating ASCII lines from
+binary frames on the same serial stream.
+
+ADC chip readouts gained EMA smoothing and a 250 ms timed refresh; the scope gained axis units
+and k·x+b correction.
+
+
+[20261010 0.1.4-adcstream]
+
+Added adc.stream / adc_streamer batched waveform frames; deadband events are muted while the
+stream is running. Added the scope panel (collapsible, 4 channels, 2048-point ring buffer, rAF
+repaint, selection and collapse state persisted).
+
+Fix: UI stutter under three concurrent channels. Measurements show the firmware and protocol
+layer are not slow (0-channel RTT median 11 ms, 3-channel 19 ms, zero timeouts); the root cause
+was per-event rendering, eliminated by batch frames plus a single repaint per frame.
+
+
+[20261010 0.1.3-stdinpoll]
+
+Fix: sys.stdin.read(1) blocks until a byte arrives, so command_reader froze the entire event loop
+at its first step and no sibling monitor ever got a step. stdin is now gated with select.poll(),
+and tasks are gathered by task handle per the official guide.
+
+Fix: under mpy, gather awaiting bare coroutines in order misbehaved; gather accepts Task objects
+only.
+
+Rebuilt the PWM frequency editor as a "numeric preset × unit preset" combination, with
+float-safe persistence.
+
+Known device-side limits: on rp2, changing .frequency of a fixed-frequency PWMOut raises
+Invalid variable_frequency, so the firmware rebuilds the object when the frequency changes;
+frequency accepts integer Hz only, floor about 7.4 Hz. On USB CDC, print(flush=True) raises
+OSError [Errno 22] on every call (the text still goes out), so no flush is used.
+
+
+[20261010 0.1.0-adc / 0.1.1-montdbg]
+
+Added the ADC readout lane: adc.cfg / adc.stop, 100 ms sampling, change push at an about 0.5%
+deadband. Display favours voltage with a switch to raw values; the format choice persists with
+the configuration.
+
+Added the dbg event, reporting each monitor task's liveness and exceptions (before this, gather
+swallowed dead tasks and failures looked like silence). The pin model extended to 29 pins; the
+ADC display cycles between V/mV/raw.
+
+
+[20261009 0.0.9-nbstdin]
+
+Command reading made non-blocking, fixing "an answer only appeared at the next request".
+
+The UI gained console copy/export and a PWM frequency preset dropdown; the workbench
+configuration is stored in the browser's localStorage, silently restored after connect and
+self-healed through drift reconciliation.
+
+
+[20261009 0.0.8-async]
+
+The firmware moved to an asyncio main loop; gpio_in edge events push at 50 ms (CircuitPython does
+not ship asyncio, so run circup install asyncio).
+
+The host switched input levels to event-driven, with polling reduced to a 1 s reconciliation
+self-heal pass.
+
+
+[20261009 0.0.7-arbiter]
+
+The firmware gained a command dispatch table and pin ownership arbitration by an owner arbiter
+(claim/release, PWM preemption may force).
+
+The host was refactored in layers: transport / rpc / model / workbench. Functions register as
+FunctionDef entries, so adding a bus function only takes writing a def and registering it.
+
+
+[20261009 0.0.6-wb]
+
+IO assignment workbench (pin pool plus function lanes, bind by drag or click, an occupied pin
+automatically bumps the previous one). The debug console integrated xterm.js, bilingual
+Chinese/English.
+
+History before this is out of scope for this document: the project used PicoJig as its blueprint
+and became a single-file host app built on CircuitPython plus browser Web Serial straight over
+USB CDC.
+
+
+[Roadmap, not done]
+
+Device-side config.json auto-restore on power-up.
+SPI bus lanes (needs CS pin support).
+A standalone error panel.

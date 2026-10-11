@@ -1,0 +1,136 @@
+PicoHarness Build Guide
+
+This document covers how to produce the deliverables from source, how to deploy to the board,
+and how to verify after a change. For usage see "01_GUIApp_FW_Manual", for the interface
+definition see "02_Library_User_Guide".
+
+
+[Prerequisites]
+
+The following versions are verified to work:
+
+Node.js: 24.18.0
+npm: bundled with Node
+Browser: desktop Chrome or Edge (needs the Web Serial API)
+Board: Raspberry Pi Pico 2 (rp2350a)
+Device firmware: CircuitPython 10.3.1 (board_id: raspberry_pi_pico2)
+
+The repository depends only on esbuild, typescript and two frontend runtimes (xterm.js).
+Install with:
+
+    npm install
+
+The device side needs an asyncio implementation (CircuitPython does not ship one). Install it
+into the board's lib directory with circup:
+
+    circup install asyncio
+
+Afterwards lib/asyncio/ and lib/adafruit_ticks.mpy should exist under the CIRCUITPY volume.
+From now on, touch device libraries only through circup; never copy them by hand.
+
+
+[Build steps]
+
+    npm run build
+
+The artifact is the single file dist/index.html (all JS/CSS inlined, about 400 KB). Double-click
+it and it works straight from file://; no server needed. dist/ is git-ignored, do not commit it.
+
+
+[Firmware deployment]
+
+The firmware is the single file src/fw/code.py. Deploying means copying it to the root of the
+CIRCUITPY volume (written as G: below):
+
+    cp src/fw/code.py /g/code.py
+
+Note:
+
+Writing the file triggers an immediate soft reset; the live Web Serial connection drops, so
+click Connect again in the UI.
+If a main.py exists in the G: root, CircuitPython never runs code.py (main.py takes priority).
+And do not claim GP0/GP1 or build buses from boot.py.
+If G: has no lib/, circup did not install successfully and code.py will fail to start with an
+ImportError.
+
+
+[Type check]
+
+The repository has no tsconfig.json. Running npx tsc directly reports TS5058, so the parameters
+must be given explicitly:
+
+    npx -p typescript tsc --noEmit --strict \
+        --module esnext --target es2020 --moduleResolution bundler \
+        --lib es2020,dom --skipLibCheck src/ui/main.ts
+
+npm run build goes through esbuild, which only bundles and does no type checking. After any
+change to a .ts file, run the command above separately.
+
+
+[Verification chain]
+
+After changing the firmware (code.py), do these in order:
+
+1. Syntax check
+       .venv/Scripts/python.exe -m py_compile src/fw/code.py
+2. Deploy to the board (see above)
+3. Query the device directly with pyserial to confirm the new commands and fields really exist:
+   open COM3 → send \x03 to stop the running program → wait 0.8 s → clear the input buffer →
+   send \x04 to restart code.py → send commands one by one and read the replies.
+   Use the python from the venv for the script (pyserial is installed only in .venv; the system
+   pip has no network access). Write output via sys.stdout.buffer.write, because a GBK console
+   blows up on UTF-8. On startup the device first sends an ANSI/OSC escape that sets the
+   terminal title; it is glued to the front of the ready JSON with no newline, so the script
+   must strip it with a regex or locate the braces to extract the JSON.
+
+After changing the UI, do these in order:
+
+1. Type check (see above)
+2. npm run build
+3. Open dist/index.html in a browser for a DOM smoke test: assert that elements exist, that
+   interactions work, and that the console is clean. Most logic can be tested without a board —
+   lane binding, drag highlighting and persistence do not depend on the device.
+   Clear localStorage when the test ends (keys: picoharness-config-v1, picoharness-scope-v1).
+
+[Troubleshooting criteria]
+
+The UI sends a new command and the device answers "unknown cmd", or the gpio.state reply is
+missing a new field, or ready.caps has no uart/i2c_pairs — that is not a frontend bug, it means
+G:\code.py is still the old version. Compare the VERSION string in the device-side code.py with
+the source and copy the file once more.
+
+[Firmware implementation notes]
+
+The main loop is an asyncio task group: command_reader on stdin, gpio_monitor for edge pushes,
+adc_monitor for deadband pushes, adc_streamer for the batched waveform feed. Each coroutine is
+wrapped with create_task first and the handles are then awaited via gather(t1, t2, ...). The gather
+in this mpy port accepts Task objects only; passing bare coroutines trips a "missing await"
+assertion inside sleep_ms.
+
+Three constraints established on real hardware, known before touching the scheduler:
+
+1. sys.stdin.read(1) blocks until at least one byte arrives. It is not the non-blocking
+   "returns None when empty" idiom. Ungated, command_reader freezes the whole event loop on its
+   very first step and every sibling task starves (that was the real cause of the ADC showing no
+   readings). Correct form: register stdin with select.poll() and gate each read with
+   while poll(0):.
+2. busio.UART defaults to timeout=1000 ms, so a single empty read stalls the cooperative loop.
+   Buses are created with timeout=0.
+3. On USB CDC, print(..., flush=True) raises OSError [Errno 22] after every write (the text still
+   goes out). Do not flush explicitly.
+
+Also: writing .frequency on an rp2 fixed-frequency PWMOut raises Invalid variable_frequency, so the
+firmware deinits and rebuilds the object when the frequency changes. The mpy asyncio port is a
+queue-rotating scheduler and create_task concurrency on it is sound (the earlier diagnosis that
+"gather awaits children in order and starves them" was disproved on hardware).
+
+The UI layering and its dependency direction are in the "Architecture" section of the repository
+README; not repeated here. One hard rule: dependencies point one way, downward. Each function under
+workbench/ is a FunctionDef plugin, so adding a bus function means writing a def (+ driver) module and
+registering it in the defs array, plus registering its commands in the firmware COMMANDS table.
+
+[Commit convention]
+
+git commit titles always use type(scope): subject, for example feat(uart): ..., fix(fw): ....
+The firmware version lives in the VERSION constant in code.py and is bumped together with the
+feature changes.

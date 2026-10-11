@@ -1,0 +1,289 @@
+# PicoHarness User Manual
+
+This manual gets PicoHarness running from an empty desk and walks each feature in turn.
+If you only care about connecting wires and driving the UI, this is the only document you need.
+For protocol details see [02 Protocol Reference](../02_Library_User_Guide/README.md). For recipes and error lookups see [03 Example Workflows](../03_Sample_Program_User_Guide/README.md).
+
+---
+
+## 1. What PicoHarness Is
+
+One Pico board plus one web page make a desktop test fixture.
+
+- The PC-side deliverable is a **single HTML file**. Double-click it and you are working: no Python, no drivers, no local server.
+- The page connects to the Pico's USB serial port through the browser's **Web Serial API**.
+- The board runs one CircuitPython `code.py`. It receives JSON commands, drives pins, and pushes readings back.
+
+What you can do: switch pins, measure voltage, generate PWM, scan an I2C bus, and send UART, plus a scope panel and a debug console you can type into.
+
+Verified environment: Raspberry Pi Pico 2 (rp2350a), CircuitPython 10.3.1, desktop Chrome or Edge.
+
+---
+
+## 2. Prepare the Board
+
+### 2.1 Flash CircuitPython
+
+Download the UF2 from <https://circuitpython.org/board/raspberry_pi_pico2/>. Use the matching board page if you are on different hardware.
+
+1. Power the board off: unplug the USB cable.
+2. Hold the BOOTSEL button on the board, plug the cable back into the PC, then release the button.
+3. A USB drive named `RPI-RP2` appears on the PC.
+4. Drag the `.uf2` file onto that drive. The board reboots on its own.
+5. After the reboot a drive named `CIRCUITPY` appears. That means the flash succeeded.
+
+### 2.2 Install Firmware Dependencies
+
+The event loop in `code.py` needs the `asyncio` library, which CircuitPython does not ship. Without it, a serial terminal
+reports `ImportError: no module named 'asyncio'`.
+
+The least effort route is circup, installed once on the PC:
+
+```bash
+pip install circup
+circup install asyncio
+```
+
+circup puts `asyncio` and its dependency `adafruit_ticks` into the `lib/` directory of the CIRCUITPY volume, in versions that
+match your CircuitPython.
+
+If you would rather not install circup, download the [Library Bundle](https://circuitpython.org/libraries) by hand and copy the
+`asyncio` directory and `adafruit_ticks.mpy` into `CIRCUITPY/lib/`.
+
+### 2.3 Deploy the Firmware
+
+Copy `src/fw/code.py` from this repository into the root of the CIRCUITPY volume, overwriting the file of the same name.
+
+If the root contains a `main.py`, delete it or rename it: CircuitPython runs `main.py` and would never touch `code.py`.
+
+When the copy finishes, the board reboots and starts running. This step installs nothing on the PC.
+
+> Every later change to `code.py` is the same move: copy it over and the board reboots itself.
+> The reboot drops the browser's serial connection, so reconnect.
+
+---
+
+## 3. Open the Host App
+
+Take `dist/index.html` (see [04 Build Guide](../04_FW_Build_Guide.txt) for how to build it yourself) and open it in Chrome or Edge
+by double-clicking. It works straight from `file://`; you do not need a local server.
+
+Click **Connect** at the top of the page. The browser opens a port picker; select your board. It usually shows up as
+`USB Serial Device`, or as an entry carrying the `2E10` vendor ID.
+
+After a successful connection:
+
+- The status light at the top turns green and displays the firmware version.
+- The console below prints the handshake.
+- The pin chips on the workbench gain capability badges (P = PWM, A = ADC, S/D = I2C, T/R = UART).
+
+Those badges come **from the board itself**; they are not hardcoded in the page. Swap in another board, or let some other owner
+claim a pin, and the UI reflects it truthfully. You never get a pin that looks usable but is not.
+
+To disconnect, click the same button again (its label changes to "Disconnect").
+
+---
+
+## 4. The Workbench
+
+The workbench is the main view, split into a top half and a bottom half:
+
+- On top, the **pin pool** lays out every GP pin on the board. Each chip shows the pin name and its capability badges.
+- Below it, the **lanes**, one per function: digital input, digital output, PWM, ADC, I2C, UART.
+
+Binding a pin has two forms, pick whichever you prefer:
+
+| Action | Result |
+| --- | --- |
+| Drag a chip into a lane | Binds that pin to the function |
+| Click a chip, then click the lane | Same |
+| Click the × on a chip | Releases that pin |
+| Drag a chip back into the pin pool | Same |
+
+There is one rule: **a pin belongs to one function at a time**. Drag a pin that is already doing PWM into the ADC lane and it
+leaves the PWM lane by itself; you do not unbind it first. The firmware does this arbitration, so two people can keep two pages
+open against the same board without both believing the pin is theirs.
+
+Every change **takes effect immediately and is sent to the board**. There is no Save or Apply button.
+
+### 4.1 Digital Input
+
+Drag a pin into the digital input lane. A small dot appears on the chip and follows the pin level in real time (lit = high).
+
+Click the dropdown on the chip to choose pull-up / pull-down / none. The default is pull-up, which means a floating pin reads high.
+
+Level changes are pushed by the board to the page, so the response is fast. The page also reconciles once per second, so if the
+board was rebooted the configuration is replayed back to it automatically.
+
+### 4.2 Digital Output
+
+Drag a pin into the digital output lane. A clickable level block appears on the chip; click it to toggle between high and low.
+
+### 4.3 PWM
+
+Drag a pin into the PWM lane, then set the frequency and the duty cycle.
+
+The ▾ button next to the frequency field opens a preset grid from 1 to 1000. Pick a number, then set the magnitude with the unit
+dropdown on the right (mHz / Hz / kHz / MHz). So "50kHz" costs two clicks: 50, then kHz.
+
+Duty cycle is a number between 0 and 1.
+
+**One trap to know up front**: rp2 hardware PWM is grouped by slice, one counter per slice, so
+**the two pins in one slice share a single frequency**. The grouping is roughly adjacent even/odd pairs:
+GP0 and GP1 are one slice, GP2 and GP3 the next, and so on. Set GP0 to 1kHz, then set GP1 to 500Hz, and
+GP0's frequency follows to 500Hz. This is not a bug; the hardware is built that way. When you need two
+independent frequencies, pick non-adjacent pins (GP7 and GP11, for example). A given PWM channel can also
+be routed to a higher-numbered pin, and then the two are secretly one slice, so when in doubt, measure
+whether the frequencies overwrite each other.
+
+### 4.4 ADC
+
+Drag a pin into the ADC lane. The chip displays the voltage directly. Click the number to cycle between V, mV, and raw.
+
+The ADC lane also accepts a special **TEMP** chip, which sits at the end of the pin pool. It is the on-die temperature sensor.
+It displays degrees Celsius by default. It occupies no physical pin and can run at the same time as other ADC channels.
+
+### 4.5 I2C
+
+I2C and UART are bus functions, so their UI is different: a lane holds **bus cards** rather than single pins.
+
+Click "+ Add bus" at the bottom of the lane. A card appears with two labelled slots, SDA and SCL. Drag a pin badged D into the
+SDA slot and a pin badged S into the SCL slot.
+
+When a drop is refused, the UI tells you why (this pin cannot serve as SCL, or these two pins cannot form a pair). You never get
+a silent no-op.
+
+The rp2 I2C pin pairs are **not arbitrary**: SCL must be an odd pin, SDA must be an even pin, and `SDA = SCL - 1` (mod 4) must
+hold. GP5 with GP4 is legal; GP8 with GP10 can never pair. The board reports the legal combinations itself, so following the
+badges prevents misselection.
+
+The card also sets the clock frequency, scans the bus (the `Scan` button lists the addresses that acknowledge on the bus), and
+runs raw transactions (fill in the slave address, the bytes to write, and the byte count to read).
+
+On a new setup, scan first. An empty scan usually means no wiring or no pull-ups: an I2C bus needs pull-up resistors that hold
+both lines high when idle. Many sensor modules carry them; bare chips do not.
+
+### 4.6 UART
+
+Also a bus card, with two slots: TX and RX.
+
+Unlike I2C, **a UART card with only one slot filled still counts**. TX only means you transmit and never receive, RX only means
+you listen and never send; both are legitimate uses. The pairing check runs only when both slots are filled.
+
+On the card you pick the baud rate, type hex bytes to send, and read back a byte count.
+
+**Two traps**:
+
+1. **GP0 and GP1 are unavailable.** They really are UART0 in hardware, but the CircuitPython serial console claims them at boot,
+   and using them fails with `GP1 in use`. The capability table the board reports already excludes both pins, so the UI will not
+   let you select them.
+2. The usable UART pins come from a fixed set, and for full duplex TX and RX must land on the same UART instance.
+   Likewise, following the T / R badges keeps you correct.
+
+### 4.7 Live UART Terminal
+
+The Read button on a card is too clumsy for streaming serial data. So the console area has a row of tabs above it: **Console** is
+the raw serial mirror, and each UART you configure adds a tab such as **UART #0** or **UART #1**.
+
+Open a UART tab:
+
+- Bytes the board receives are printed into the terminal live.
+- Characters you type in the terminal go straight out on the matching TX.
+- The **HEX** button in the top right switches the display: text mode shows bytes as they are, HEX mode shows them as uppercase
+  hexadecimal. Use HEX when you are debugging a binary protocol.
+
+Only the tab on screen receives data. Switch away and the push stops, so nothing wastes bandwidth.
+
+The Clear / Copy / Export buttons at the top follow the current tab: clear a UART tab and you clear that terminal.
+
+---
+
+## 5. Scope Panel
+
+Below the workbench is a collapsible waveform area. Each pin bound in the ADC lane adds a channel button here, TEMP included, up
+to 4 channels at once.
+
+Click "Start Capture". The board switches to one batch every 25ms and hands each completed batch to the page, which draws it on
+the canvas.
+
+What you can do:
+
+| Gesture | Effect |
+| --- | --- |
+| Scroll wheel | Zoom horizontally, **anchored on the sample point under the cursor** |
+| Shift + wheel | Zoom vertically, anchored on the voltage under the cursor |
+| Press and drag | Pan the time axis and look back through history |
+| Double-click | Reset to the full view |
+| Crosshair button | Shows a crosshair at the cursor, with the timestamp and every channel value read out in the top left |
+
+Two acquisition modes: **Roll** scrolls a fixed 2048-point window continuously; **FIFO** lets you choose the depth (256 to 4096)
+and overwrites the oldest data in a ring once full, which suits capturing a window and then stopping.
+
+Each channel takes a `y = k·x + b` correction, applied in the raw domain. The TEMP channel depends on this to turn raw back into
+degrees Celsius.
+
+Channel colours are assigned per pin and stay put: close a channel and open it again and the colour does not change, and adding
+another channel never displaces the colours of the channels already on screen.
+
+During acquisition, the reading on the lane chip reuses the newest row of the waveform frame and is smoothed, so the digits do not
+jump around and the two displays never disagree.
+
+---
+
+## 6. Debug Console
+
+The bottom of the page holds the console, in two modes:
+
+- **Monitor**: read-only, mirrors everything the board pushes out of its serial port. Use it for errors and `print` output.
+- **REPL**: writable, your keystrokes pass straight through to the board's CircuitPython prompt. Use it to try a snippet on the spot.
+
+A button switches modes. When you switch to REPL, any open UART tab yields to Console automatically, because the board's REPL and
+our data stream fight over the same serial port. Switching back to Monitor re-runs the handshake.
+
+Three action buttons: clear, copy all, export as a txt file.
+
+---
+
+## 7. Interface Settings
+
+- The **EN / 中文** buttons in the top right switch language, and the choice is remembered.
+- Your bound pins, frequencies, bus configurations, and scope channel selection all live in `localStorage`.
+  Close the page and open it again and they come back; once the board connects, they are sent down to it.
+- To wipe everything, run `localStorage.clear()` in the browser console and refresh.
+
+Note that the configuration lives in the **browser**, not in the board. Move to another PC and you configure from scratch.
+After the board loses power, its own configuration is zeroed; the page's once-per-second reconciliation replays it back.
+
+---
+
+## 8. Hardware Caveats at a Glance
+
+These are traps already stepped in, collected here to save your time.
+
+| Item | Detail |
+| --- | --- |
+| PWM pins in one slice share a frequency | Changing the frequency on one pin overwrites the other. Need independent frequencies, change pins. |
+| PWM frequency floor | The hardware accepts integer Hz only, with a real floor around 7.4Hz. The page lets smaller values through, and the board reports the error as it is. |
+| I2C needs pull-ups | If neither line is held high at idle you get `No pull up found`. That is a wiring problem, not a software problem. |
+| I2C pin pairs are fixed | SCL odd, SDA even, `SDA = SCL-1 (mod 4)`. Follow the S/D badges. |
+| UART cannot use GP0/GP1 | Claimed by the CircuitPython console; already excluded from the capability table. |
+| UART pins are fixed | Only certain pins can be TX or RX, and for full duplex both pins must be on the same UART. |
+| Copying code.py reboots the board | The browser's serial connection drops, so you have to reconnect. |
+| Swapping boards | The capability table is probed, so the UI adapts on its own. No code changes needed. |
+
+---
+
+## 9. If You Cannot Connect
+
+Check these in order.
+
+1. **Is the board powered?** Is the CIRCUITPY volume there? If not, reflash the UF2.
+2. **Is code.py at the root?** The file must be named `code.py` and must sit in the root directory, not a subdirectory.
+3. **Is asyncio installed?** Open a serial terminal and read the board's output. `ImportError: no module named 'asyncio'`
+   means the library is missing; go back to section 2.2.
+4. **Right browser?** It must be desktop Chrome or Edge. Firefox and Safari do not support Web Serial.
+5. **Is the port already claimed?** If Thonny, mpremote, or another serial tool holds the COM port, close it first.
+6. **No port picker appears?** Did you click "Connect"? Is there a blocked permission prompt on the right of the address bar?
+
+Still stuck? Open the error lookup in [03 Example Workflows](../03_Sample_Program_User_Guide/README.md), or attach a serial tool
+and read what the board sends.
