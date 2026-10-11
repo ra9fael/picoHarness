@@ -1,5 +1,8 @@
 # PicoHarness firmware — IO workbench stage
-# JSON-lines command loop over USB CDC (REPL stdin/stdout).
+# JSON-lines command loop over USB CDC. With the shipped boot.py the protocol
+# runs on the second CDC port (usb_cdc.data) and the CircuitPython console keeps
+# print()/REPL to itself; without it everything falls back to the console, i.e.
+# the pre-0.1.12 single-port behaviour.
 # Architecture: a command dispatch table routes to per-function drivers
 # (gpio / pwm / ...). Every driver must claim(n, who) a pin before touching
 # it and release(n) when done — the owner table is the single arbiter of pin
@@ -13,7 +16,7 @@
 # adc.stream is on, and keeping adc_monitor quiet) ships batched waveform
 # frames {"evt":"adc_w","pins":[...],"ms":dt,"v":[[...],...]} — or, with
 # adc.stream fmt="bin", the same batch as a compact 0xAA'W'-framed struct
-# payload written atomically to the CDC console (see send_bin). The on-die
+# payload written atomically to the protocol port (see send_bin). The on-die
 # temperature sensor participates as virtual ADC channel 100 (TEMP_PIN) — same
 # claim/monitor/stream path as a GP channel, host-side converted to °C.
 # Real-hardware lessons, in the order they bit us:
@@ -31,6 +34,10 @@
 #    works.)
 # 4. print(..., flush=True) raises OSError Errno 22 on USB CDC after the text
 #    is already written — never flush explicitly.
+# 5. usb_cdc.Serial (the data port) is a BINARY stream: read() -> bytes,
+#    write(bytes) -> int, and read() waits unless timeout == 0. That is not the
+#    text object sys.stdin is, so the data-port path buffers bytes and decodes
+#    one line at a time.
 import sys
 import select
 import time
@@ -50,8 +57,15 @@ try:
 except ImportError:  # no USB CDC console on this build — binary frames off
     usb_cdc = None
 
+# The port the protocol talks on. Set once at import: boot.py decides it, so it
+# never changes while code.py runs. None => no boot.py on the volume (or a build
+# without the second CDC interface) => fall back to the console.
+DATA = getattr(usb_cdc, "data", None) if usb_cdc is not None else None
+if DATA is not None:
+    DATA.timeout = 0  # read() returns immediately instead of waiting for bytes
+
 APP = "PicoHarness"
-VERSION = "0.1.11-uart"
+VERSION = "0.1.12-dualcdc"
 NUM_PINS = 29  # GP0..GP28: Pico-family boards expose up to GP28; on rp2040 GP27/28 are ADC1/ADC2
 
 # Virtual ADC channel id for the on-die temperature sensor. It is not a GP pin,
@@ -70,7 +84,11 @@ MODE_UNUSED, MODE_IN, MODE_OUT = 0, 1, 2
 
 def send(obj):
     # compact separators: no spaces after , and : — ~15% smaller on the wire
-    print(json.dumps(obj, separators=(",", ":")))
+    line = json.dumps(obj, separators=(",", ":"))
+    if DATA is None:
+        print(line)
+    else:
+        DATA.write((line + "\n").encode())
 
 
 # —— binary waveform frames (optional adc.stream fmt="bin") ——
@@ -78,15 +96,19 @@ def send(obj):
 # waveform kind (1) = struct "<BBHH"(kind, nch, ms, nrows) + u16le[nch] pins
 # + u16le[nrows*nch] samples (row-major, one row per sample instant).
 # The 0xAA magic never occurs in our ASCII text stream, so the host can
-# byte-scan for it and keep both formats interleaved on one CDC endpoint.
-# write() is atomic per call, so a frame never interleaves with a print line.
+# byte-scan for it and keep both formats interleaved on one port.
+# write() is atomic per call, so a frame never interleaves with a JSON line.
 BIN_MAGIC = b"\xaaW"
 
 
 def send_bin(payload):
+    frame = BIN_MAGIC + struct.pack("<H", len(payload)) + payload
+    if DATA is not None:
+        DATA.write(frame)
+        return
     if usb_cdc is None or usb_cdc.console is None:
-        raise RuntimeError("usb_cdc console unavailable")
-    usb_cdc.console.write(BIN_MAGIC + struct.pack("<H", len(payload)) + payload)
+        raise RuntimeError("no CDC port available for bin frames")
+    usb_cdc.console.write(frame)
 
 
 def parse_req(line):
@@ -627,8 +649,8 @@ def adc_stream(args):
     fmt = args.get("fmt", "json")
     if fmt not in ("json", "bin"):
         raise ValueError("fmt must be json or bin")
-    if fmt == "bin" and (usb_cdc is None or usb_cdc.console is None):
-        raise ValueError("usb_cdc console unavailable for bin frames")
+    if fmt == "bin" and DATA is None and (usb_cdc is None or usb_cdc.console is None):
+        raise ValueError("no CDC port available for bin frames")
     STREAM = {"pins": tuple(ps), "ms": ms, "batch": batch, "fmt": fmt}
     return {"ok": True, "data": {"stream": {"pins": ps, "ms": ms, "batch": batch, "fmt": fmt}}}
 
@@ -759,7 +781,16 @@ def probe_uart():
 def probe_caps():
     # Ask CircuitPython itself which pins support PWM / ADC, plus the legal I2C
     # pin PAIRS, instead of hard-coding tables that drift with CP releases.
-    caps = {"pwm": [], "adc": [], "i2c_pairs": [], "uart": {"tx": [], "rx": [], "pairs": []}}
+    caps = {
+        "pwm": [],
+        "adc": [],
+        "i2c_pairs": [],
+        "uart": {"tx": [], "rx": [], "pairs": []},
+        # Which CDC topology the board came up with: true = boot.py enabled the
+        # second port and the protocol is on it, false = single-port console
+        # fallback. The host needs this to know whether a console port exists.
+        "usb": {"data": DATA is not None},
+    }
     for n in range(NUM_PINS):
         try:
             p = PWMOut(_pin(n), duty_cycle=0)
@@ -942,27 +973,44 @@ send(
 
 _stdin_poll = select.poll()
 _stdin_poll.register(sys.stdin, select.POLLIN)
+_rx = b""
 
 
-async def command_reader():
-    buf = ""
-    while True:
-        # poll(0) = "is a byte already waiting?" — without this gate read(1)
-        # blocks here and no other task ever advances.
+def _read_lines():
+    # Yield whole lines already buffered on the command port, then stop. Both
+    # gates are mandatory: an ungated read blocks the task group (lesson 1), and
+    # on the data port read(n) would wait for n bytes (lesson 5), so ask only
+    # for what in_waiting already promises.
+    global _rx
+    if DATA is not None:
+        n = DATA.in_waiting
+        if n:
+            chunk = DATA.read(n if n < 512 else 512)
+            if chunk:
+                _rx += chunk
+    else:
         while _stdin_poll.poll(0):
             ch = sys.stdin.read(1)
             if not ch:
                 break
-            buf += ch
-            if ch == "\n":
-                line = buf.strip()
-                buf = ""
-                if not line:
-                    continue
-                try:
-                    dispatch(parse_req(line))
-                except ValueError:
-                    send({"id": None, "ok": False, "error": "bad json"})
+            _rx += ch.encode()
+    while True:
+        i = _rx.find(b"\n")
+        if i < 0:
+            return
+        line, _rx = _rx[:i], _rx[i + 1 :]
+        s = line.decode("utf-8", "replace").strip()
+        if s:
+            yield s
+
+
+async def command_reader():
+    while True:
+        for line in _read_lines():
+            try:
+                dispatch(parse_req(line))
+            except ValueError:
+                send({"id": None, "ok": False, "error": "bad json"})
         await asyncio.sleep(0.002)
 
 
