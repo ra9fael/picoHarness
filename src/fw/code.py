@@ -65,7 +65,7 @@ if DATA is not None:
     DATA.timeout = 0  # read() returns immediately instead of waiting for bytes
 
 APP = "PicoHarness"
-VERSION = "0.1.12-dualcdc"
+VERSION = "0.1.13-dualcdc"
 NUM_PINS = 29  # GP0..GP28: Pico-family boards expose up to GP28; on rp2040 GP27/28 are ADC1/ADC2
 
 # Virtual ADC channel id for the on-die temperature sensor. It is not a GP pin,
@@ -878,6 +878,12 @@ def cmd_ping(args):
     return {"ok": True, "data": {"pong": args.get("t")}}
 
 
+def cmd_hello(args):
+    # A host that opens the protocol port after the board booted missed the
+    # broadcast ready line, so it asks for the same payload as a reply.
+    return {"ok": True, "data": boot_info()}
+
+
 def cmd_echo(args):
     return {"ok": True, "data": {"echo": args.get("msg")}}
 
@@ -923,6 +929,7 @@ def cmd_adc_stop(args):
 
 COMMANDS = {
     "ping": cmd_ping,
+    "hello": cmd_hello,
     "echo": cmd_echo,
     "gpio.cfg": cmd_gpio_cfg,
     "gpio.out": cmd_gpio_out,
@@ -959,16 +966,25 @@ def dispatch(req):
     send(resp)
 
 
-send(
-    {
-        "evt": "ready",
+# Caps are probed once at boot: the I2C sweep touches every legal pin pair, so
+# a host that connects after startup asks for the cached copy instead of paying
+# for it again.
+CAPS = probe_caps()
+
+
+def boot_info():
+    return {
         "app": APP,
         "version": VERSION,
         "cp": list(sys.implementation.version[0:3]),
         "pins": NUM_PINS,
-        "caps": probe_caps(),
+        "caps": CAPS,
     }
-)
+
+
+_ready = boot_info()
+_ready["evt"] = "ready"
+send(_ready)
 
 
 _stdin_poll = select.poll()
