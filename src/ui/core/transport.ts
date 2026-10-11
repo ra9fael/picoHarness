@@ -1,13 +1,14 @@
-// Layer 1 — byte plumbing. Owns the Web Serial port and the single reader:
+// Layer 1 — byte plumbing. Owns one Web Serial port and its single reader:
 // opens it, and byte-scans the inbound stream for two interleaved kinds of
-// data on the one CDC endpoint — ASCII text lines (framed on "\n", emitted as
-// "line", and teed to the terminal as "raw") and binary waveform frames
-// (0xAA 'W' + u16le len + payload, emitted as "frame" with the payload bytes).
+// data — ASCII text lines (framed on "\n", emitted as "line", and teed to the
+// terminal as "raw") and binary waveform frames (0xAA 'W' + u16le len +
+// payload, emitted as "frame" with the payload bytes).
 // Our text is pure ASCII JSON so the 0xAA magic can never occur inside it,
 // which makes the scan unambiguous. It survives transient read breaks by
 // re-attaching the reader as long as the port is alive. Emits "log" for
 // wire-level chatter and "gone" when the link actually died.
-// It knows nothing about JSON or commands.
+// It knows nothing about JSON or commands, and one instance is used per port:
+// the protocol port and, when the user attaches it, the CircuitPython console.
 import { Emitter } from "./events";
 import { t, tf } from "../i18n";
 
@@ -30,14 +31,20 @@ export class Transport extends Emitter {
     return this.writer !== null;
   }
 
-  async open(): Promise<void> {
+  // `port` lets the caller hand in a port it already found and identified;
+  // without one the browser picker asks the user.
+  async open(port?: any): Promise<void> {
     if (!("serial" in navigator)) throw new Error(t("err_no_serial"));
-    this.port = await (navigator as any).serial.requestPort();
+    this.port = port ?? (await (navigator as any).serial.requestPort());
     await this.port.open({ baudRate: 115200 });
     this.reader = this.port.readable.getReader();
     this.writer = this.port.writable.getWriter();
     this.running = true;
     void this.pump();
+  }
+
+  owns(port: any): boolean {
+    return this.port === port;
   }
 
   async writeRaw(s: string): Promise<void> {

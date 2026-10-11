@@ -9,7 +9,7 @@ export type JsonMsg = {
   pins?: number[]; // adc_w frame: channel pins in column order
   ms?: number; // adc_w frame: sample interval on the device
   v?: number[][]; // adc_w frame: rows of raw readings, one per sample tick
-  caps?: { pwm?: number[]; adc?: number[] };
+  caps?: { pwm?: number[]; adc?: number[]; usb?: { data?: boolean } };
 };
 
 // LinkState models port reality, not wishful thinking:

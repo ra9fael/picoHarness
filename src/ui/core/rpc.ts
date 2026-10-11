@@ -74,6 +74,9 @@ export class Rpc extends Emitter {
     }
     this.emit("log", ">> " + line);
     if (msg.evt === "ready") {
+      // Always announced, so the session can tell a handshake reply from a
+      // device program that restarted underneath an established link.
+      this.emit("ready", msg);
       const waiters = this.readyWaiters;
       this.readyWaiters = [];
       for (const f of waiters) f(msg);

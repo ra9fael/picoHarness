@@ -12,6 +12,7 @@ const btnConnect = $("btn-connect") as HTMLButtonElement;
 const btnPing = $("btn-ping") as HTMLButtonElement;
 const btnEcho = $("btn-echo") as HTMLButtonElement;
 const btnMode = $("btn-mode") as HTMLButtonElement;
+const btnLog = $("btn-logport") as HTMLButtonElement;
 const btnLang = $("btn-lang") as HTMLButtonElement;
 const btnCollapse = $("btn-collapse") as HTMLButtonElement;
 const statusEl = $("status");
@@ -70,6 +71,9 @@ function syncUi() {
     linkState === "ready" || linkState === "repl" ? "ok" : linkState === "closed" ? "" : "bad";
   btnConnect.textContent = linkState === "closed" ? t("btn_connect") : t("btn_disconnect");
   btnConnect.disabled = !hasSerial || linkState === "connecting";
+  const logged = link.consoleAttached;
+  btnLog.textContent = t(logged ? "btn_logport_on" : "btn_logport");
+  btnLog.disabled = logged || linkState !== "ready";
   btnPing.disabled = btnEcho.disabled = linkState !== "ready" || consolePanel.mode !== "monitor";
   wb.setActive(linkState === "ready" && consolePanel.mode === "monitor");
   scope.setActive(linkState === "ready" && consolePanel.mode === "monitor");
@@ -96,7 +100,13 @@ link.onStateChange = (s) => {
   syncUi();
 };
 link.onEvent = (m) => {
-  if (m.evt === "ready") return; // handshake notes are printed where awaited
+  if (m.evt === "ready") {
+    // Only reaches here when the program restarted under an established link
+    // (reset button, or code.py saved from Explorer): caps may have changed.
+    wb.setCaps(m.caps);
+    consolePanel.note(tf("ready_again", JSON.stringify(m)));
+    return;
+  }
   if (m.evt === "adc_w") {
     scope.onMsg(m); // batched waveform frames: drawn on rAF, never logged
     return;
@@ -156,6 +166,16 @@ btnEcho.addEventListener("click", async () => {
 btnMode.addEventListener("click", () =>
   consolePanel.setMode(consolePanel.mode === "monitor" ? "repl" : "monitor")
 );
+
+btnLog.addEventListener("click", async () => {
+  try {
+    await link.attachConsole();
+    consolePanel.note(t("logport_ok"));
+  } catch (e: any) {
+    consolePanel.note(tf("logport_fail", e.message));
+  }
+  syncUi();
+});
 
 btnLang.addEventListener("click", () => {
   setLang(getLang() === "zh" ? "en" : "zh");

@@ -1,4 +1,5 @@
-// Debug console: xterm.js terminal fed by the raw serial stream.
+// Debug console: xterm.js terminal fed by the device's own output — the
+// CircuitPython console port when one is attached, the protocol port otherwise.
 // Monitor mode = read-only mirror; REPL mode = keyboard passthrough to >>>.
 import { Terminal } from "@xterm/xterm";
 import { FitAddon } from "@xterm/addon-fit";
@@ -48,7 +49,7 @@ export class ConsolePanel {
     };
 
     this.term.onData((d) => {
-      if (this.mode === "repl") this.link.writeRaw(d).catch(() => {});
+      if (this.mode === "repl") this.link.writeToRepl(d).catch(() => {});
     });
 
     new ResizeObserver(() => this.fit.fit()).observe(mount);
