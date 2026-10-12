@@ -406,6 +406,7 @@ main { padding: 16px; }
   font: 12px var(--mono);
 }
 #console-bar button { padding: 3px 10px; font-size: 12px; }
+#btn-rawstream.on { color: var(--accent); border-color: var(--accent); }
 #console-bar .label { color: var(--dim); }
 #mode-tag {
   color: var(--accent);

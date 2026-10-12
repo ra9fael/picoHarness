@@ -1,10 +1,15 @@
-// Debug console: xterm.js terminal fed by the device's own output — the
-// CircuitPython console port when one is attached, the protocol port otherwise.
+// Debug console: xterm.js terminal fed by the device's own output. With the
+// dual-CDC firmware the CircuitPython console port is the only place the device
+// talks about itself, so those bytes are mirrored here; the protocol port's
+// bytes are request replies and are NOT shown unless the board is a single-port
+// one (where that port carries everything) or the operator asks for them.
 // Monitor mode = read-only mirror; REPL mode = keyboard passthrough to >>>.
 import { Terminal } from "@xterm/xterm";
 import { FitAddon } from "@xterm/addon-fit";
 import type { SerialLink } from "./serial";
 import { t, tf } from "./i18n";
+
+const CONF_KEY = "picoharness-console-v1";
 
 const C = {
   tx: "\x1b[38;5;75m",
@@ -17,12 +22,17 @@ export class ConsolePanel {
   private term: Terminal;
   private fit: FitAddon;
   mode: "monitor" | "repl" = "monitor";
+  private showProto = false;
 
   constructor(
     private link: SerialLink,
     mount: HTMLElement,
     private onModeChange: (m: "monitor" | "repl") => void = () => {},
   ) {
+    try {
+      const o = JSON.parse(localStorage.getItem(CONF_KEY) || "{}");
+      this.showProto = !!o.showProto;
+    } catch {}
     this.term = new Terminal({
       fontSize: 12,
       fontFamily: '"Cascadia Code", Consolas, monospace',
@@ -41,10 +51,14 @@ export class ConsolePanel {
 
     this.term.writeln(C.sys + t("welcome") + C.reset);
 
-    link.onRawData = (b) => this.term.write(b);
+    link.onRawData = (b, role) => {
+      if (role === "console") this.term.write(b);
+      else if (this.protoVisible()) this.term.write(b);
+    };
     link.onLog = (line) => {
-      if (line.startsWith("<<")) this.term.writeln(C.tx + line + C.reset);
-      else if (line.startsWith("!!")) this.term.writeln(C.err + line + C.reset);
+      if (line.startsWith("!!")) this.term.writeln(C.err + line + C.reset);
+      else if (line.startsWith("<<") && this.protoVisible())
+        this.term.writeln(C.tx + line + C.reset);
       // ">>" and "  " noise already shown via raw stream; skip duplicates.
     };
 
@@ -88,6 +102,27 @@ export class ConsolePanel {
 
   clear() {
     this.term.clear();
+  }
+
+  rawStreamOn(): boolean {
+    return this.showProto;
+  }
+
+  // With no console port on the board the protocol port is the only way to see
+  // anything the device sends, so its stream stays visible there.
+  private protoVisible(): boolean {
+    return this.showProto || !this.link.consoleAttached;
+  }
+
+  // Debug switch: also mirror the protocol port, whose bytes are normally just
+  // replies the UI already decoded. Persisted — it is a session-long choice.
+  toggleRawStream(): boolean {
+    this.showProto = !this.showProto;
+    try {
+      localStorage.setItem(CONF_KEY, JSON.stringify({ showProto: this.showProto }));
+    } catch {}
+    this.note(this.showProto ? t("raw_on") : t("raw_off"));
+    return this.showProto;
   }
 
   // Plain-text dump of the visible scrollback, ANSI stripped.

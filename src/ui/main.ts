@@ -13,6 +13,7 @@ const btnPing = $("btn-ping") as HTMLButtonElement;
 const btnEcho = $("btn-echo") as HTMLButtonElement;
 const btnMode = $("btn-mode") as HTMLButtonElement;
 const btnLog = $("btn-logport") as HTMLButtonElement;
+const btnRaw = $("btn-rawstream") as HTMLButtonElement;
 const btnLang = $("btn-lang") as HTMLButtonElement;
 const btnCollapse = $("btn-collapse") as HTMLButtonElement;
 const statusEl = $("status");
@@ -74,6 +75,8 @@ function syncUi() {
   const logged = link.consoleAttached;
   btnLog.textContent = t(logged ? "btn_logport_on" : "btn_logport");
   btnLog.disabled = logged || linkState !== "ready";
+  btnRaw.classList.toggle("on", consolePanel.rawStreamOn());
+  btnRaw.title = t("raw_hint");
   btnPing.disabled = btnEcho.disabled = linkState !== "ready" || consolePanel.mode !== "monitor";
   wb.setActive(linkState === "ready" && consolePanel.mode === "monitor");
   scope.setActive(linkState === "ready" && consolePanel.mode === "monitor");
@@ -177,6 +180,11 @@ btnLog.addEventListener("click", async () => {
   syncUi();
 });
 
+btnRaw.addEventListener("click", () => {
+  consolePanel.toggleRawStream();
+  syncUi();
+});
+
 btnLang.addEventListener("click", () => {
   setLang(getLang() === "zh" ? "en" : "zh");
   applyStaticLabels();
@@ -218,4 +226,9 @@ btnCollapse.addEventListener("click", () => {
 if (!hasSerial) {
   consolePanel.note(t("no_serial"));
 }
+
+// Smoke tests need the live objects: xterm only renders the viewport, so the
+// only reliable readback is ConsolePanel.bufferText() through this handle.
+(window as any).__ui = { link, consolePanel, wb, scope, uartTerms };
+
 applyStaticLabels();

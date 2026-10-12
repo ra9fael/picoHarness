@@ -8,6 +8,7 @@
 import { Transport } from "./core/transport";
 import { Rpc } from "./core/rpc";
 import { askNewPort, findProtocolPort, grantedPorts, probePort } from "./core/ports";
+import type { PortRole } from "./core/ports";
 import { t } from "./i18n";
 import type { JsonMsg, LinkState } from "./types";
 
@@ -19,7 +20,7 @@ const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 export class SerialLink {
   onLog: (line: string) => void = () => {};
   onEvent: (msg: JsonMsg) => void = () => {};
-  onRawData: (bytes: Uint8Array) => void = () => {};
+  onRawData: (bytes: Uint8Array, role: PortRole) => void = () => {};
   onFrame: (payload: Uint8Array) => void = () => {};
   onStateChange: (state: LinkState) => void = () => {};
 
@@ -30,11 +31,9 @@ export class SerialLink {
 
   constructor() {
     this.tp.on("log", (l: string) => this.onLog(l));
-    // Mirror the console port when it is attached, otherwise the protocol port
-    // still carries the device's own output (single-port boards).
-    this.tp.on("raw", (b: Uint8Array) => {
-      if (!this.ctl) this.onRawData(b);
-    });
+    // Tag every mirrored byte with the port it came from. On a dual-CDC board
+    // the two ports carry unrelated traffic — the panel decides what to show.
+    this.tp.on("raw", (b: Uint8Array) => this.onRawData(b, "protocol"));
     this.tp.on("frame", (b: Uint8Array) => this.onFrame(b));
     this.tp.on("line", (l: string) => this.rpc.feed(l));
     this.tp.on("gone", () => {
@@ -172,7 +171,7 @@ export class SerialLink {
 
   private async openConsole(port: any): Promise<void> {
     const ctl = new Transport();
-    ctl.on("raw", (b: Uint8Array) => this.onRawData(b));
+    ctl.on("raw", (b: Uint8Array) => this.onRawData(b, "console"));
     ctl.on("log", (l: string) => this.onLog(l));
     ctl.on("gone", () => {
       this.ctl = null;
