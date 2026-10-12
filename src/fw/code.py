@@ -65,8 +65,63 @@ if DATA is not None:
     DATA.timeout = 0  # read() returns immediately instead of waiting for bytes
 
 APP = "PicoHarness"
-VERSION = "0.1.16-spi"
-NUM_PINS = 29  # GP0..GP28: Pico-family boards expose up to GP28; on rp2040 GP27/28 are ADC1/ADC2
+VERSION = "0.1.17-gp29"
+# Which GPIOs this harness may touch is decided by two things stacked on top of
+# each other: the CHIP PACKAGE and, narrower still, the BOARD DEFINITION.
+#  * pico-sdk src/rp2350/hardware_regs/include/hardware/platform_defs.h sets
+#    NUM_BANK0_GPIOS to 30 for the RP2350A QFN-60 (GP0..GP29) and 48 for the
+#    RP2350B QFN-80 (GP0..GP47), and the same file puts the ADC at
+#    ADC_BASE_PIN=26/NUM_ADC_CHANNELS=5 on RP2350A (ADC0..ADC3 = GP26..GP29) and
+#    ADC_BASE_PIN=40/9 on RP2350B (ADC0..ADC8 = GP40..GP47 plus temperature,
+#    VREF+ and VBAT).
+#  * CircuitPython can only hand out a pin the board's pins.c DECLARES, and a Pin
+#    object exposes no number -- only its identity -- so the number has to be read
+#    off the attribute names. The official tables are narrower than the package
+#    and they skip numbers: raspberry_pi_pico2_w names GP0..GP22 and GP26..GP28
+#    but NOT GP23/GP24/GP25 (on that board those are the CYW43 SMPS_MODE / LED /
+#    VBUS_SENSE pins), and neither board names GP30..GP47 at all.
+#    GP29 on the Pico 2 is the instructive case. It exists and every function
+#    works on it -- measured on the board: ADC3 reads VSYS/3, PWMOut builds and
+#    reports its divided frequency, DigitalInOut drives it, busio.I2C(SCL=GP29,
+#    SDA=GP28) is accepted, UART(TX=GP28, RX=GP29) builds -- but pins.c declares
+#    it as board.A3 / VOLTAGE_MONITOR, with no "GP" token in the name. So a pin
+#    whose only names are ADC aliases is numbered ADC_BASE + channel, ADC_BASE
+#    being the pin behind A0; every rp2 board does spell A0 with a GP token
+#    (board.GP26_A0 here, GP40_A0 on a QFN-80 part), which keeps the rule data
+#    driven instead of hardcoded per board.
+# So the addressable set is read off `board` at import, and it may legitimately
+# have HOLES -- which is why this is a sparse map of number -> attribute name
+# rather than a count, and why _pin() refuses a number that has no name instead
+# of raising AttributeError. Everything downstream (owner[], the sweeps,
+# caps.pins) sizes itself from the highest addressable number.
+def _pin_names():
+    objs = {}  # id(pin object) -> the attribute names that reach it
+    for attr in dir(board):
+        obj = getattr(board, attr)
+        if type(obj).__name__ != "Pin":
+            continue
+        objs.setdefault(id(obj), []).append(attr)
+    numbers = {}
+    aliases = []
+    adc_base = None
+    for attrs in objs.values():
+        gp = [a for a in attrs if a.startswith("GP") and a[2:].isdigit()]
+        if gp:
+            numbers[int(gp[0][2:])] = gp[0]
+            if "A0" in attrs:
+                adc_base = int(gp[0][2:])
+        else:
+            aliases.append(attrs)
+    for attrs in aliases:
+        a = [x for x in attrs if x.startswith("A") and x[1:].isdigit()]
+        if a and adc_base is not None:
+            numbers[adc_base + int(a[0][1:])] = a[0]
+    return numbers
+
+
+GP_NAMES = _pin_names()
+GPS = sorted(GP_NAMES)
+NUM_PINS = GPS[-1] + 1 if GPS else 0
 
 # Virtual ADC channel id for the on-die temperature sensor. It is not a GP pin,
 # so it lives outside the owner[] arbiter (tracked by the temp_on flag) and is
@@ -125,7 +180,14 @@ def parse_req(line):
 
 
 def _pin(n):
-    return getattr(board, "GP%d" % n)
+    # A GPIO the board definition never named is unreachable, not illegal: raise
+    # the same ValueError the CP constructors raise for an unusable pin, so the
+    # capability sweeps and the command handlers both treat a hole the way they
+    # already treat "this pin cannot do that".
+    name = GP_NAMES.get(n)
+    if name is None:
+        raise ValueError("board has no GP%d" % n)
+    return getattr(board, name)
 
 
 # —— pin ownership arbiter ——
@@ -201,6 +263,8 @@ def apply_cfg(in_mask, out_mask, pd_mask=0, pn_mask=0):
     # Pull: DOWN if pd bit, NONE if pn bit, else UP.
     global out_bits
     for n in range(NUM_PINS):
+        if n not in GP_NAMES:
+            continue  # not on this module's board table at all
         if owner[n] in ("pwm", "adc", "i2c", "spi"):
             continue  # other drivers own this pin; host must stop them first
         want = MODE_OUT if (out_mask >> n) & 1 else (MODE_IN if (in_mask >> n) & 1 else MODE_UNUSED)
@@ -364,10 +428,11 @@ def adc_stop(pin):
 # Unlike gpio/pwm/adc (one owner per pin), an I2C bus owns a PAIR of pins, so it
 # lives in its own table keyed by a host-assigned bus id and registers both
 # members in owner[] under "i2c". Releasing either pin tears the whole bus down.
-# rp2 PIO I2C only accepts certain pin pairs (real-hardware: GP8/GP10 was
-# rejected with "Invalid pins"), so probe_caps().i2c lists the pins that can be
-# in at least one valid bus; the host greys the rest. Final legality is still
-# decided when the object is constructed and reported back.
+# The rp2 hardware I2C (Synopsys DW_apb_i2c, NUM_I2CS = 2, NOT PIO) only accepts
+# certain pin pairs (real-hardware: GP8/GP10 was rejected with "Invalid pins"), so
+# probe_caps().i2c lists the pins that can be in at least one valid bus; the host
+# greys the rest. Final legality is still decided when the object is constructed
+# and reported back.
 i2c_bus = {}  # id -> {"obj": I2C, "sda": n, "scl": m, "freq": hz}
 
 
@@ -424,11 +489,11 @@ def i2c_cfg(args):
         for n in (sda, scl):
             if owner[n] == "i2c":
                 owner[n] = None
-        # "Invalid pins" is the rp2 PIO mux refusing the ordered pair: SCL must
-        # be odd, SDA even, and sda ≡ scl-1 (mod 4). Name the rule so the host
-        # can guide the user instead of showing a bare ValueError.
+        # "Invalid pins" is the rp2 hardware-I2C mux refusing the ordered pair:
+        # SCL must be odd, SDA even, and sda ≡ scl-1 (mod 4). Name the rule so the
+        # host can guide the user instead of showing a bare ValueError.
         raise ValueError(
-            "I2C pin pair GP%d(SCL)/GP%d(SDA) not routable to one PIO "
+            "I2C pin pair GP%d(SCL)/GP%d(SDA) not routable to one hardware I2C "
             "(need SCL odd, SDA even, sda==scl-1 mod 4): %s" % (scl, sda, e)
         )
     except RuntimeError as e:
@@ -641,8 +706,7 @@ def uart_read(args):
 # them tears the whole bus down, because busio.SPI has no per-pin release.
 #
 # Two properties of the rp2 port shaped this API and both were measured with
-# tools/spi_probe.py on CircuitPython 10.3.1 / Pico 2, not derived from the
-# datasheet (the two disagree about which pins are routable):
+# tools/spi_probe.py on CircuitPython 10.3.1 / Pico 2:
 #  * the constructor takes the pins POSITIONALLY, accepts no baudrate= or
 #    half_duplex= keyword, and refuses a bare SCK, so speed and mode are set
 #    afterwards with configure() -- which only works while the bus is locked
@@ -659,18 +723,27 @@ spi_bus = {}  # id -> {"obj": SPI, "sck": n, "mosi": m|-1, "miso": k|-1, "baud":
 
 SPI_MAX_CS = 4
 
-# Which (SCK, MOSI, MISO) sets the port actually accepts, measured by
-# tools/spi_probe.py on CircuitPython 10.3.1 / Pico 2 (rp2350a): the sweep tried
-# every ordered (SCK, partner) pair in both roles, accepted 53 of them, and they
-# fall in exactly two groups; the 100 accepted triples are the cross-product of
-# those groups and 1571 pairs raised "Invalid pins". The groups are also the two
-# SPI peripherals, so two live buses must take one group each -- the port answers
-# "SPI peripheral in use" otherwise. This is a static table like probe_uart()'s,
-# deliberately not a boot-time sweep: the sweep is 1600+ constructor calls and
-# takes minutes, and the answer is a property of the silicon, not of the wiring.
+# Which (SCK, MOSI, MISO) sets the port accepts. tools/spi_probe.py swept every
+# ordered (SCK, partner) pair in both roles on CircuitPython 10.3.1 / Pico 2:
+# 53 accepted pairs, falling in exactly two groups, and 1571 pairs raised "Invalid
+# pins". Those two groups are the two SPI peripherals -- the same split the
+# datasheet draws -- and they agree row for row with pico-sdk
+# src/rp2_common/hardware_gpio/include/hardware/gpio.h ("On RP2350 the function
+# selects are", F1 = SPI; F1 CSn rows are ignored because busio.SPI takes no CS
+# pin). A second live bus therefore has to take the other group or the port
+# answers "SPI peripheral in use".
+# This is a static table like probe_uart()'s, deliberately not a boot-time sweep:
+# the sweep is 1600+ constructor calls and takes minutes, and the answer is a
+# property of the silicon, not of the wiring.
+# Entries 30..47 are the RP2350B (QFN-80) rows of the same table: they are
+# documented, NOT measured, because this harness runs an RP2350A. They are inert
+# on a 30-GPIO board -- the host only offers pins below caps.pins -- and they turn
+# the SPI lane from a Pico-2-only table into the full RP2350 one.
 SPI_GROUPS = [
-    {"sck": [2, 6, 18, 22], "mosi": [3, 7, 19, 23], "miso": [0, 4, 16, 20]},
-    {"sck": [10, 14, 26], "mosi": [11, 15, 27], "miso": [8, 12, 24, 28]},
+    {"sck": [2, 6, 18, 22, 34, 38], "mosi": [3, 7, 19, 23, 35, 39],
+     "miso": [0, 4, 16, 20, 32, 36]},
+    {"sck": [10, 14, 26, 30, 42, 46], "mosi": [11, 15, 27, 31, 43, 47],
+     "miso": [8, 12, 24, 28, 40, 44]},
 ]
 
 
@@ -1008,22 +1081,36 @@ def cmd_unsub(args):
 
 
 # —— capability probe ——
-# rp2 PIO I2C legality is a property of the ORDERED (scl, sda) pair, not of any
-# single pin (real-hardware grid: GP8/GP10 and every distance-2 pair are "Invalid
-# pins", while many far-apart pairs are fine), and it is tangled enough that no
-# simple human rule reproduces it. So the authoritative oracle is CircuitPython
-# itself at construction — see probe_i2c_pairs(). We deliberately do NOT probe
-# per-pin I2C "capability": on a bare harness busio.I2C raises "No pull up found"
-# for legal-but-unwired pairs, which is a wiring condition, not a pin limit, so a
-# per-pin list would wrongly mark every pin unusable.
+# rp2 I2C legality is a property of the ORDERED (scl, sda) pair, not of any single
+# pin, and two documented sources agree on the rule: CircuitPython
+# ports/raspberrypi/common-hal/busio/I2C.c accepts a pair only when
+#     scl % 2 == 1 && sda % 2 == 0 && (scl / 2) % 2 == (sda / 2) % 2
+# i.e. SCL odd, SDA even, both on the same one of the two HARDWARE I2C
+# peripherals (NUM_I2CS = 2, pico-sdk platform_defs.h) — which is exactly the F3
+# column of the pico-sdk gpio.h RP2350 function table (I2C0 SCL on 1, 5, …, 29 and
+# I2C1 SCL on 3, 7, …, 47, each SDA the number below it). We still PROBE rather
+# than ship the formula, for one reason only: the port's own answer is what this
+# firmware has to match, and asking it is cheap.
+# We deliberately do NOT probe per-pin I2C "capability": on a bare harness
+# busio.I2C raises "No pull up found" for legal-but-unwired pairs, which is a
+# wiring condition, not a pin limit, so a per-pin list would wrongly mark every
+# pin unusable.
 def probe_i2c_pairs():
     # Each ordered (scl, sda) that CircuitPython will ACCEPT (i.e. does not raise
     # "Invalid pins") is legal — a "No pull up" RuntimeError still proves the pin
     # pair is routable, just not wired to a bus. Returned as [[scl,sda], ...].
+    # The candidates come from the documented rule above (SCL odd, SDA even, both
+    # on the same peripheral), which is a sixth of the product; sweeping the
+    # product would mean NUM_PINS^2 constructors at import -- 2304 on a 48-GPIO
+    # board, against the 288 a 30-GPIO board already pays. The probe is still the
+    # arbiter of the answer, and the candidate filter is CP's OWN condition, so no
+    # legal pair can be missed by it.
     pairs = []
-    for scl in range(NUM_PINS):
-        for sda in range(NUM_PINS):
-            if scl == sda:
+    for scl in GPS:
+        if scl % 2 != 1:
+            continue
+        for sda in GPS:
+            if sda % 2 != 0 or (scl // 2) % 2 != (sda // 2) % 2:
                 continue
             try:
                 o = busio.I2C(_pin(scl), _pin(sda), frequency=100000)
@@ -1039,34 +1126,48 @@ def probe_i2c_pairs():
 
 
 def probe_uart():
-    # Deterministic hardware-UART pin map, NOT a runtime construct probe. On the
-    # RP2350 only 2 hardware UARTs exist (UART0/UART1), and which GPIO can be
-    # their TX vs RX is a fixed property of the pinctrl (RP2350 datasheet Table 3,
-    # "GPIO Bank 0 Functions"): even GPIOs are always a UART TX (or CTS), odd
-    # GPIOs always a UART RX (or RTS), and a full-duplex pair must sit on the same
-    # instance. Probing by busio.UART construction was flaky because rp2 UART/PWM/
-    # I2C all contend for PIO + instances, so the same pins passed or failed
-    # depending on leftover state — the datasheet rule is the stable oracle.
-    #
-    # Instance per TX/RX pin, read straight off Table 3 (Pico 2 breaks out GP0..26).
-    tx_inst = {0: 0, 2: 0, 4: 1, 6: 1, 8: 1, 10: 1, 12: 0, 14: 0, 16: 0, 18: 0, 20: 1, 22: 1, 24: 1, 26: 1}
-    rx_inst = {1: 0, 3: 0, 5: 1, 7: 1, 9: 1, 11: 1, 13: 0, 15: 0, 17: 0, 19: 0, 21: 1, 23: 1, 25: 1}
-    tx_ok = [n for n in sorted(tx_inst) if n < NUM_PINS]
-    rx_ok = [n for n in sorted(rx_inst) if n < NUM_PINS]
-    pairs = [[t, r] for t in tx_ok for r in rx_ok if tx_inst[t] == rx_inst[r]]
+    # Deterministic, generated from the documentation rather than hand-copied.
+    # Two sources pin this down completely:
+    #  * pico-sdk src/rp2_common/hardware_gpio/include/hardware/gpio.h, the
+    #    "On RP2350 the function selects are" table (RP2350 datasheet, GPIO Bank 0
+    #    Functions): every even GPIO carries a UART TX (F2 GPIO_FUNC_UART when
+    #    n % 4 == 0, F11 GPIO_FUNC_UART_AUX when n % 4 == 2) and every odd GPIO a
+    #    UART RX (F2 when n % 4 == 1, F11 when n % 4 == 3).
+    #  * CircuitPython ports/raspberrypi/common-hal/busio/UART.c, which picks the
+    #    function exactly that way and takes the instance from the pin number:
+    #        inst = ((n + 4) / 8) % NUM_UARTS      (NUM_UARTS = 2, platform_defs.h)
+    # Checked row by row against all 30 RP2350A GPIOs: 0/12/16/28 -> UART0 TX,
+    # 4/8/20/24 -> UART1 TX, 2/14/18 -> UART0 AUX TX, 6/10/22/26 -> UART1 AUX TX,
+    # 1/13/17/29 -> UART0 RX, 5/9/21/25 -> UART1 RX, 3/15/19 -> UART0 AUX RX,
+    # 7/11/23/27 -> UART1 AUX RX. A full-duplex pair is legal when both members
+    # land on the same instance; single-pin buses (TX-only or RX-only) are fine.
+    NUM_UARTS = 2
+
+    def inst(n):
+        return ((n + 4) // 8) % NUM_UARTS
+
+    tx_ok = [n for n in GPS if n % 2 == 0]
+    rx_ok = [n for n in GPS if n % 2 == 1]
+    pairs = [[t, r] for t in tx_ok for r in rx_ok if inst(t) == inst(r)]
     return {"tx": tx_ok, "rx": rx_ok, "pairs": pairs}
 
 
 def probe_caps():
     # Ask CircuitPython itself which pins support PWM / ADC, plus the legal I2C
     # pin PAIRS, instead of hard-coding tables that drift with CP releases.
+    # Every list here is in terms of GPS — the GPIOs this board can actually name —
+    # so the host never offers a pin the firmware would refuse.
     caps = {
+        # The addressable set itself, holes and all: caps.pins is only the highest
+        # id + 1, and a board table like raspberry_pi_pico2_w has gaps in it.
+        "gp": GPS,
         "pwm": [],
         "adc": [],
         "i2c_pairs": [],
         "uart": {"tx": [], "rx": [], "pairs": []},
-        # SPI pins are a static measured table (SPI_GROUPS), not a sweep: see the
-        # comment there. baud_ceiling is 150MHz/2, the smallest even divider the
+        # SPI pins are a static table (SPI_GROUPS): measured on this RP2350A and
+        # extended with the documented RP2350B rows, not a sweep — see the comment
+        # there. baud_ceiling is 150MHz/2, the smallest even divider the
         # rp2 SPI clock prescaler can produce (measured: .frequency never exceeded
         # 75000000 no matter how high the request).
         "spi": {
@@ -1080,14 +1181,14 @@ def probe_caps():
         # fallback. The host needs this to know whether a console port exists.
         "usb": {"data": DATA is not None},
     }
-    for n in range(NUM_PINS):
+    for n in GPS:
         try:
             p = PWMOut(_pin(n), duty_cycle=0)
             p.deinit()
             caps["pwm"].append(n)
         except ValueError:
             pass
-    for n in range(NUM_PINS):
+    for n in GPS:
         try:
             a = analogio.AnalogIn(_pin(n))
             a.deinit()
@@ -1096,6 +1197,14 @@ def probe_caps():
             pass
     caps["i2c_pairs"] = probe_i2c_pairs()
     caps["uart"] = probe_uart()
+    # The static SPI table covers the whole RP2350, so project it onto GPS before
+    # shipping it: on a board that cannot name GP30..GP47 those entries would offer
+    # pins the very next command rejects.
+    gps = set(GPS)
+    caps["spi"]["groups"] = [
+        {role: [n for n in pins if n in gps] for role, pins in g.items()}
+        for g in SPI_GROUPS
+    ]
     try:
         _ = microcontroller.cpu.temperature
         caps["adc"].append(TEMP_PIN)
