@@ -20,6 +20,7 @@
   --c-adc: #c8a2d0;
   --c-i2c: #4fd0c0;
   --c-uart: #f0a860;
+  --c-spi: #d98fa8;
 }
 * { box-sizing: border-box; border-radius: 0; }
 body {
@@ -107,6 +108,7 @@ main { padding: 16px; }
 .wb-lane.l-adc .wb-lane-head { color: var(--c-adc); }
 .wb-lane.l-i2c .wb-lane-head { color: var(--c-i2c); }
 .wb-lane.l-uart .wb-lane-head { color: var(--c-uart); }
+.wb-lane.l-spi .wb-lane-head { color: var(--c-spi); }
 .chip {
   display: inline-flex;
   align-items: center;
@@ -188,6 +190,7 @@ main { padding: 16px; }
 #gpio.idle .wb-buszone { pointer-events: none; opacity: 0.55; }
 #gpio.idle .i2c-card * { pointer-events: none; }
 #gpio.idle .uart-card * { pointer-events: none; }
+#gpio.idle .spi-card * { pointer-events: none; }
 .i2c-card {
   border: 1px solid var(--border);
   background: #161c22;
@@ -319,6 +322,76 @@ main { padding: 16px; }
   cursor: pointer;
 }
 .uart-add:hover { color: var(--c-uart); border-color: var(--c-uart); }
+.spi-card {
+  border: 1px solid var(--border);
+  background: #161c22;
+  padding: 6px;
+  margin-bottom: 8px;
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+}
+.spi-card.ready { border-color: var(--c-spi); }
+.spi-head { display: flex; align-items: center; gap: 6px; color: var(--c-spi); }
+.spi-head svg { width: 16px; height: 16px; }
+.spi-title { font: 600 12px var(--mono); letter-spacing: 1px; }
+.spi-head .rel { margin-left: auto; }
+.spi-slots { display: grid; grid-template-columns: repeat(3, 1fr); gap: 5px; }
+.spi-csrow { display: flex; align-items: center; gap: 5px; flex-wrap: wrap; }
+.spi-slot {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  border: 1px dashed var(--border);
+  background: #10161b;
+  padding: 3px 6px;
+  font: 11px var(--mono);
+}
+.spi-csrow .spi-slot { flex: 1; min-width: 74px; }
+.spi-slot.filled { border-style: solid; border-color: var(--c-spi); }
+.spi-slot.compat {
+  border-style: solid;
+  border-color: var(--c-spi);
+  background: #1f1620;
+  cursor: copy;
+}
+.spi-slot.compat .spi-slot-val { color: var(--c-spi); }
+.spi-slot-tag { color: var(--dim); letter-spacing: 1px; }
+.spi-slot-val { color: var(--fg); cursor: pointer; }
+.spi-slot.filled .spi-slot-val:hover { color: var(--err); }
+.spi-row { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
+.spi-lbl { font: 10px var(--mono); color: var(--dim); letter-spacing: 1px; }
+.spi-sel, .spi-hex, .spi-len {
+  background: #10161b;
+  border: 1px solid var(--border);
+  color: var(--fg);
+  font: 11px var(--mono);
+  padding: 2px 5px;
+}
+.spi-hex { width: 120px; flex: 1; min-width: 60px; }
+.spi-len { width: 48px; }
+.spi-hold { accent-color: var(--c-spi); }
+.spi-out {
+  font: 11px var(--mono);
+  color: var(--c-spi);
+  background: #10161b;
+  border: 1px solid var(--border);
+  padding: 3px 6px;
+  min-height: 20px;
+  word-break: break-all;
+}
+.spi-add {
+  width: 100%;
+  border: 1px dashed var(--border);
+  background: none;
+  color: var(--dim);
+  font: 11px var(--mono);
+  padding: 4px;
+  cursor: pointer;
+}
+.spi-add:hover { color: var(--c-spi); border-color: var(--c-spi); }
+.spi-add:disabled { cursor: default; opacity: 0.5; }
+.spi-add:disabled:hover { color: var(--dim); border-color: var(--border); }
 #scope {
   border: 1px solid var(--border);
   background: var(--panel);

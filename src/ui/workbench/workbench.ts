@@ -3,7 +3,7 @@
 // reconciliation poll; all function-specific behavior lives in the defs.
 // Adding I2C/SPI later = write a def module and push it into this.defs.
 import type { SerialLink, JsonMsg } from "../serial";
-import { PinModel, SLOTS, TEMP, R_ADC, R_PWM, R_I2C, R_UART, pinLabel } from "../model/pins";
+import { PinModel, SLOTS, TEMP, R_ADC, R_PWM, R_I2C, R_UART, R_SPI, pinLabel } from "../model/pins";
 import { blankConfig, clearStored, configText, importConfig as importSnapshot, loadConfig, saveConfig } from "../model/store";
 import { t, tf, type MsgKey } from "../i18n";
 import { el } from "./dom";
@@ -13,6 +13,7 @@ import { PwmDriver, makePwmDef } from "./pwm";
 import { AdcDriver, makeAdcDef, adcText } from "./adc";
 import { I2cDriver, makeI2cDef } from "./i2c";
 import { UartDriver, makeUartDef } from "./uart";
+import { SpiDriver, makeSpiDef } from "./spi";
 
 const POLL_MS = 1000; // drift reconciliation; live levels come via gpio_in
 
@@ -24,6 +25,7 @@ export class Workbench {
   private adc: AdcDriver;
   private i2c: I2cDriver;
   private uart: UartDriver;
+  private spi: SpiDriver;
   private defs: FunctionDef[];
   private labEls = new Map<MsgKey, HTMLElement>();
   private zoneEls = new Map<number, HTMLElement>();
@@ -70,12 +72,14 @@ export class Workbench {
     this.adc = new AdcDriver(api);
     this.i2c = new I2cDriver(this.model);
     this.uart = new UartDriver(this.model);
+    this.spi = new SpiDriver(this.model);
     this.defs = [
       ...makeDigitalDefs(this.digital),
       makePwmDef(this.pwm),
       makeAdcDef(this.adc),
       makeI2cDef(this.i2c),
       makeUartDef(this.uart),
+      makeSpiDef(this.spi),
     ];
     this.model.on("levels", () => this.updateLeds());
     // ADC events arrive in bursts (deadband) or once per stream batch; repaint
@@ -157,11 +161,12 @@ export class Workbench {
 
   setCaps(caps: any): void {
     this.model.setCaps(caps);
-    // A (re)handshake means the device's volatile I2C/UART configs are gone, so
+    // A (re)handshake means the device's volatile bus configs are gone, so
     // clear each driver's rejection latch — otherwise a bus that failed on the
     // old firmware (or before a reboot) would be skipped by resync forever.
     this.i2c.resetLatch();
     this.uart.resetLatch();
+    this.spi.resetLatch();
     this.pruneCaps();
     this.render();
   }
@@ -184,6 +189,7 @@ export class Workbench {
       [R_ADC]: "cfg_pruned_adc",
       [R_I2C]: "cfg_pruned_i2c",
       [R_UART]: "cfg_pruned_uart",
+      [R_SPI]: "cfg_pruned_spi",
     };
     const groups = new Map<number, string>();
     for (const d of dropped) {
@@ -303,7 +309,8 @@ export class Workbench {
       if (drift.pwmDrift) this.pwm.scheduleAll();
       if (drift.adcDrift) this.adc.scheduleAll();
       if (drift.i2cDrift) this.i2c.resync();
-    if (drift.uartDrift) this.uart.resync();
+      if (drift.uartDrift) this.uart.resync();
+      if (drift.spiDrift) this.spi.resync();
     } catch {}
   }
 

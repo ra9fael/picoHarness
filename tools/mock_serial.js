@@ -15,7 +15,40 @@
     i2c_pairs: [[1, 0], [5, 4], [9, 8], [13, 12], [17, 16], [21, 20]],
     uart: { tx: [0, 2, 4, 6, 8], rx: [1, 3, 5, 7, 9], pairs: [[0, 1], [2, 3], [4, 5], [6, 7], [8, 9]] },
     usb: { data: true },
+    // Mirrors the firmware's caps.spi — the two rp2350 SPI pin groups measured by
+    // tools/spi_probe.py, one CS budget, and the 75 MHz divider ceiling.
+    spi: {
+      groups: [
+        { sck: [2, 6, 18, 22], mosi: [3, 7, 19, 23], miso: [0, 4, 16, 20] },
+        { sck: [10, 14, 26], mosi: [11, 15, 27], miso: [8, 12, 24, 28] },
+      ],
+      max_buses: 2,
+      max_cs: 4,
+      baud_ceiling: 75000000,
+    },
   };
+
+  // The group a requested data-pin set belongs to, or null when it spans two (the
+  // port then answers "Invalid pins"). Absent members (-1) do not participate.
+  function SPI_GROUP(sck, mosi, miso) {
+    for (var i = 0; i < CAPS.spi.groups.length; i++) {
+      var g = CAPS.spi.groups[i];
+      var ok = g.sck.indexOf(sck) >= 0;
+      if (mosi >= 0) ok = ok && g.mosi.indexOf(mosi) >= 0;
+      if (miso >= 0) ok = ok && g.miso.indexOf(miso) >= 0;
+      if (ok) return g;
+    }
+    return null;
+  }
+
+  function spiRealHz(baud) {
+    var SYS = 150000000;
+    if (baud >= 75000000) return 75000000;
+    for (var div = 2; div <= 2 * SYS; div += 2) {
+      if (SYS / div <= baud) return Math.floor(SYS / div);
+    }
+    return baud;
+  }
 
   function makePort(name, isProtocol) {
     var p = {
@@ -25,6 +58,7 @@
       ctrl: null,
       rx: "",
       pw: {}, // slot -> {freq, hfreq, duty}, mirroring firmware read_state().pwm
+      spi: {}, // bus id -> {sck, mosi, miso, cs, baud, hbaud, mode}, ditto read_state().spi
       getInfo: function () {
         return { usbVendorId: 0x2e8a, usbProductId: 0x000b };
       },
@@ -88,15 +122,82 @@
           Object.keys(p.pw).forEach(function (k) {
             mask |= 1 << Number(k);
           });
+          var spiMask = 0;
+          var spiList = [];
+          Object.keys(p.spi).forEach(function (k) {
+            var b = p.spi[k];
+            [b.sck, b.mosi, b.miso].concat(b.cs).forEach(function (n) {
+              if (n >= 0) spiMask |= 1 << n;
+            });
+            spiList.push(b);
+          });
           return p.send({
             id: m.id,
             ok: true,
             data: {
               cfg_in: 0, cfg_out: 0, out: 0, dev_in: 0,
-              cfg_pwm: mask, cfg_adc: 0, cfg_i2c: 0, cfg_uart: 0,
+              cfg_pwm: mask, cfg_adc: 0, cfg_i2c: 0, cfg_uart: 0, cfg_spi: spiMask,
+              spi: spiList,
               pwm: p.pw,
             },
           });
+        }
+        // rp2 SPI: pins must come from one group, a bare SCK is refused, and the
+        // clock is 150 MHz divided by an even integer (so requests above 75 MHz
+        // and odd intermediate values land elsewhere — hbaud tells the truth).
+        if (m.cmd === "spi.cfg") {
+          var a = m.args;
+          var g = SPI_GROUP(a.sck, a.mosi, a.miso);
+          if (!(a.sck >= 0 && (a.mosi >= 0 || a.miso >= 0)))
+            return p.send({ id: m.id, ok: false, error: "SCK plus MOSI or MISO is required" });
+          if (!g) return p.send({ id: m.id, ok: false, error: "Invalid pins" });
+          if (a.cs && a.cs.length > CAPS.spi.max_cs)
+            return p.send({ id: m.id, ok: false, error: "too many CS lines" });
+          var taken = Object.keys(p.spi).filter(function (k) {
+            return Number(k) !== Number(a.id);
+          });
+          var clash = null;
+          taken.forEach(function (k) {
+            var b = p.spi[k];
+            [b.sck, b.mosi, b.miso].concat(b.cs).forEach(function (n) {
+              if (n >= 0 && [a.sck, a.mosi, a.miso].concat(a.cs || []).indexOf(n) >= 0) clash = b;
+            });
+          });
+          if (clash)
+            return p.send({
+              id: m.id,
+              ok: false,
+              error: "GP" + clash.sck + " already belongs to SPI bus " + clash.id + " — release it first",
+            });
+          if (taken.length >= CAPS.spi.max_buses)
+            return p.send({ id: m.id, ok: false, error: "SPI peripheral in use" });
+          p.spi[String(a.id)] = {
+            id: a.id,
+            sck: a.sck,
+            mosi: typeof a.mosi === "number" ? a.mosi : -1,
+            miso: typeof a.miso === "number" ? a.miso : -1,
+            cs: (a.cs || []).slice(),
+            baud: a.baud,
+            hbaud: spiRealHz(a.baud),
+            mode: a.mode | 0,
+          };
+          return p.send({ id: m.id, ok: true, data: { spi: p.spi[String(a.id)] } });
+        }
+        if (m.cmd === "spi.xfer") {
+          var bus = p.spi[String(m.args.id)];
+          if (!bus) return p.send({ id: m.id, ok: false, error: "unknown SPI bus" });
+          var rd = [];
+          for (var i = 0; i < (m.args.r || 0); i++) rd.push((i * 17 + 3) & 0xff);
+          return p.send({
+            id: m.id,
+            ok: true,
+            data: { rd: rd, cs: m.args.cs, held: !!m.args.hold, hbaud: bus.hbaud, mode: bus.mode },
+          });
+        }
+        if (m.cmd === "spi.release") {
+          var gone = p.spi[String(m.args.id)];
+          if (gone) delete p.spi[String(m.args.id)];
+          return p.send({ id: m.id, ok: true, data: { released: !!gone } });
         }
         // rp2 fixed-frequency PWMOut: whole hertz only, and the divider cannot
         // go below 9 Hz (measured on GP25/GP2/GP12/GP0, CircuitPython 10.3.1),
