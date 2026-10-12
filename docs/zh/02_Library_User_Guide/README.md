@@ -2,7 +2,7 @@
 
 这篇是速查手册，不是教程。想知道怎么用先看 [01 使用手册](../01_GUIApp_FW_Manual/README.md)。
 
-固件版本 0.1.13-dualcdc 的全部对外接口。
+固件版本 0.1.14-uart01 的全部对外接口。
 
 ---
 
@@ -66,7 +66,7 @@ payload 第一个字节是 **kind**，标识这是哪种流：
 设备启动时主动发一条事件：
 
 ```json
-{"evt":"ready","app":"PicoHarness","version":"0.1.13-dualcdc",
+{"evt":"ready","app":"PicoHarness","version":"0.1.14-uart01",
  "cp":[10,3,1],"pins":29,
  "caps":{"pwm":[...],"adc":[...],"i2c_pairs":[[scl,sda],...],
          "uart":{"tx":[...],"rx":[...],"pairs":[[tx,rx],...]},
@@ -107,8 +107,9 @@ UART 用 RP2350 数据手册的固定引脚表。所以换板子、脚被占用�
 - **I2C（rp2 走 PIO）**：SCL 必须奇数脚、SDA 必须偶数脚，且满足 `SDA ≡ SCL-1 (mod 4)`。
   所以 GP8/GP10（都是偶数）永远配不成总线。
 - **UART（rp2 硬件外设，非 PIO）**：只有 UART0 / UART1 两路。偶数脚能做 TX，奇数脚能做 RX，
-  全双工时两脚必须落在同一路实例上。**GP0 和 GP1 已被 CircuitPython 串口控制台占用，
-  不可用**，所以已从 `caps.uart` 中排除。
+  全双工时两脚必须落在同一路实例上。**GP0(TX) / GP1(RX) 属于 UART0**：单口那会儿实测被
+  CircuitPython 串口控制台占用，这版双口固件上实测可以正常建总线，所以它们和其它脚一样
+  出现在 `caps.uart` 里。
 
 主机侧的判定规则：
 

@@ -5,6 +5,19 @@ repository commit. UI and firmware must be used as a matched pair: an old firmwa
 recognise new commands and answers "unknown cmd".
 
 
+[20261012 0.1.14-uart01]
+
+probe_uart no longer drops GP0/GP1 from the candidate list. In the single-port era that UART0
+TX/RX pair was held by the CircuitPython console (busio.UART measured "GP1 in use"); on this
+dual-CDC firmware the same check passes — uart.cfg with tx=0/rx=1, tx=0 alone, and rx=1 alone all
+built, and after release gpio.state listed no uart bus with cfg_uart=0. GP0/GP1 are back in
+caps.uart's tx/rx/pairs.
+
+No UI change: the capability table comes from the device, so one reconnect lights up the T / R
+badges on GP0/GP1. Documentation followed — manual UART notes and hardware table, protocol guide
+section 2.1, and the sample guide's GP0/GP1 paragraph now say they are usable.
+
+
 [20261012 0.1.13-dualcdc]
 
 The firmware moved to a dual CDC topology: boot.py calls usb_cdc.enable(console=True, data=True),

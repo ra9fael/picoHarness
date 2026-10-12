@@ -4,6 +4,17 @@ PicoHarness 版本说明
 界面与固件要配套：旧固件收不到新命令，会回 "unknown cmd"。
 
 
+[20261012 0.1.14-uart01]
+
+probe_uart 不再把 GP0/GP1 从候选里剔除：单口形态时这对 UART0 TX/RX 被 CircuitPython
+控制台占着（实测 busio.UART 报 "GP1 in use"），换成现在的双口固件后实测可用——
+uart.cfg tx=0 rx=1 / tx=0 单脚 / rx=1 单脚 三次建总线全部 ok，release 之后
+gpio.state 的 uart 列表为空、cfg_uart=0。GP0/GP1 因此回到 caps.uart 的 tx/rx/pairs 里。
+
+界面侧无改动：能力表是设备报上来的，重连一次就自动高亮 GP0/GP1 的 T / R 角标。
+文档同步：01 的 UART 注意事项与硬件表、02 §2.1、03 的 GP0/GP1 段落都改成"可用"。
+
+
 [20261012 0.1.13-dualcdc]
 
 固件改双 CDC 拓扑：boot.py 里 usb_cdc.enable(console=True, data=True)，

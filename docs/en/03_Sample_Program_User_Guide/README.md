@@ -180,10 +180,10 @@ GP6 is TX and GP7 is RX (even pin for TX, odd pin for RX, and both on the same h
 **Half bus is allowed**: binding TX only or RX only are both legal, unlike I2C, which requires both lines.
 With TX only you can send but cannot receive; with RX only you can receive but cannot send. The UI refuses the impossible direction and says so.
 
-**Why GP0/GP1 are out**: on the Pico 2 they are the rp2350 UART0 TX/RX, and CircuitPython's own serial console claims both of them at boot.
-The firmware already removes GP0/GP1 from `caps.uart` while probing, so the pin pool never highlights them as UART candidates.
-If your localStorage still holds an old GP0/GP1 binding saved before the upgrade, clear it and rebind once
-(**Config ▾ → Clear config**, or just connect and let the handshake drop bindings this firmware cannot serve).
+**GP0/GP1 are legal candidates again**: on the Pico 2 they are the rp2350 UART0 TX/RX. Under the old single-port
+build CircuitPython's own serial console held both of them, so probing removed them from `caps.uart`. On this
+dual-CDC firmware `uart.cfg tx=0 rx=1` builds the bus, so they are listed in `caps.uart` and the pin pool
+highlights them as UART candidates like any other pair.
 
 ---
 

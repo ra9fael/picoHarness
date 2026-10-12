@@ -2,7 +2,7 @@
 
 This is a quick reference, not a tutorial. If you want to know how to use the harness, read the [01 User Manual](../01_GUIApp_FW_Manual/README.md) first.
 
-Every external interface of firmware version 0.1.13-dualcdc.
+Every external interface of firmware version 0.1.14-uart01.
 
 ---
 
@@ -57,7 +57,7 @@ The host does **byte-level demultiplexing of the mixed stream**: it scans for th
 The device sends one event on startup:
 
 ```json
-{"evt":"ready","app":"PicoHarness","version":"0.1.13-dualcdc",
+{"evt":"ready","app":"PicoHarness","version":"0.1.14-uart01",
  "cp":[10,3,1],"pins":29,
  "caps":{"pwm":[...],"adc":[...],"i2c_pairs":[[scl,sda],...],
          "uart":{"tx":[...],"rx":[...],"pairs":[[tx,rx],...]},
@@ -84,7 +84,7 @@ On connect, the two CDC ports share one VID/PID, so `getInfo()` cannot tell them
 For these two functions the pins **do not combine freely**, and legality is a property of the pair, not of a single pin:
 
 - **I2C (rp2 goes through PIO)**: `SCL` must be an odd GP, `SDA` must be an even GP, and `SDA ≡ SCL-1 (mod 4)` must hold. So GP8/GP10 (both even) can never form a bus.
-- **UART (rp2 hardware peripheral, not PIO)**: there are only two instances, UART0 and UART1. Even pins can be TX, odd pins can be RX; for full duplex the two pins must sit on the same instance. **GP0 and GP1 are taken by the CircuitPython serial console and are unavailable**, so they are excluded from `caps.uart`.
+- **UART (rp2 hardware peripheral, not PIO)**: there are only two instances, UART0 and UART1. Even pins can be TX, odd pins can be RX; for full duplex the two pins must sit on the same instance. **GP0(TX) / GP1(RX) belong to UART0**: under the old single-port build they measured as taken by the CircuitPython serial console, while on this dual-CDC firmware they build a bus normally, so they are listed in `caps.uart` like any other pin.
 
 The host-side rule:
 

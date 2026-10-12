@@ -206,13 +206,15 @@ you listen and never send; both are legitimate uses. The pairing check runs only
 
 On the card you pick the baud rate, type hex bytes to send, and read back a byte count.
 
-**Two traps**:
+**One trap**:
 
-1. **GP0 and GP1 are unavailable.** They really are UART0 in hardware, but the CircuitPython serial console claims them at boot,
-   and using them fails with `GP1 in use`. The capability table the board reports already excludes both pins, so the UI will not
-   let you select them.
-2. The usable UART pins come from a fixed set, and for full duplex TX and RX must land on the same UART instance.
-   Likewise, following the T / R badges keeps you correct.
+- The usable UART pins come from a fixed set, and for full duplex TX and RX must land on the same UART instance.
+  Following the T / R badges keeps you correct.
+
+**GP0 and GP1 are usable now.** They are RP2350 UART0's TX/RX. In the old single-port build they measured as
+claimed by the CircuitPython console, so any use failed with `GP1 in use`; on this dual-CDC firmware the same
+check passes — `uart.cfg tx=0 rx=1` builds the bus (retested at 0.1.14). So they appear in `caps.uart.tx/rx/pairs`
+as normal, and the GP0/GP1 chips in the pool light up their T / R badges again.
 
 ### 4.7 Live UART Terminal
 
@@ -332,7 +334,7 @@ These are traps already stepped in, collected here to save your time.
 | PWM frequency floor | The hardware accepts integer Hz only, with a real floor around 7.4Hz. The page lets smaller values through, and the board reports the error as it is. |
 | I2C needs pull-ups | If neither line is held high at idle you get `No pull up found`. That is a wiring problem, not a software problem. |
 | I2C pin pairs are fixed | SCL odd, SDA even, `SDA = SCL-1 (mod 4)`. Follow the S/D badges. |
-| UART cannot use GP0/GP1 | Claimed by the CircuitPython console; already excluded from the capability table. |
+| UART on GP0/GP1 | Measured as claimed by the CircuitPython console in the old single-port build; on 0.1.14 with dual CDC they build a UART0 bus normally, and the capability table offers them. |
 | UART pins are fixed | Only certain pins can be TX or RX, and for full duplex both pins must be on the same UART. |
 | Copying code.py reboots the board | The browser's serial connection drops, so you have to reconnect. |
 | Changing boot.py needs a hard reset | Press RESET or replug. A Ctrl-D soft reboot does not re-run boot.py, so the board still shows one port. |
