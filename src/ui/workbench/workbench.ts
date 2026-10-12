@@ -111,8 +111,8 @@ export class Workbench {
       this.zoneEls.set(def.role, zone);
       if (isBus) this.busRoles.add(def.role);
     }
-    // generic drop-to-lane wiring only for per-pin lanes; bus lanes bind pins
-    // through their own labeled card slots.
+    // Generic lane wiring for the pool and the per-pin lanes; bus lanes bind
+    // pins through their own labeled card slots.
     const dropZones: HTMLElement[] = [
       this.poolEl,
       ...[...this.zoneEls].filter(([r]) => !this.busRoles.has(r)).map(([, z]) => z),
@@ -126,6 +126,13 @@ export class Workbench {
         e.preventDefault();
         const n = Number(e.dataTransfer?.getData("text/plain"));
         if (Number.isInteger(n) && n >= 0 && n < SLOTS) this.assign(n, role);
+      });
+      // A selected chip lights the eligible lanes (.compat), so a click on one
+      // of them has to bind too — otherwise the glow promises a pointer-only
+      // path that only drag ever delivered.
+      z.addEventListener("click", () => {
+        const n = this.model.sel;
+        if (n !== null && this.canDrop(role)) this.assign(n, role);
       });
     }
     document.addEventListener("click", (e) => {
