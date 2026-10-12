@@ -65,7 +65,7 @@ if DATA is not None:
     DATA.timeout = 0  # read() returns immediately instead of waiting for bytes
 
 APP = "PicoHarness"
-VERSION = "0.1.15-pwmhz"
+VERSION = "0.1.16-spi"
 NUM_PINS = 29  # GP0..GP28: Pico-family boards expose up to GP28; on rp2040 GP27/28 are ADC1/ADC2
 
 # Virtual ADC channel id for the on-die temperature sensor. It is not a GP pin,
@@ -156,6 +156,8 @@ def release(n):
         i2c_release(n)
     elif o == "uart":
         uart_release(n)
+    elif o == "spi":
+        spi_release(n)
     owner[n] = None
 
 
@@ -199,7 +201,7 @@ def apply_cfg(in_mask, out_mask, pd_mask=0, pn_mask=0):
     # Pull: DOWN if pd bit, NONE if pn bit, else UP.
     global out_bits
     for n in range(NUM_PINS):
-        if owner[n] in ("pwm", "adc", "i2c"):
+        if owner[n] in ("pwm", "adc", "i2c", "spi"):
             continue  # other drivers own this pin; host must stop them first
         want = MODE_OUT if (out_mask >> n) & 1 else (MODE_IN if (in_mask >> n) & 1 else MODE_UNUSED)
         if want == MODE_UNUSED:
@@ -633,6 +635,276 @@ def uart_read(args):
     return {"ok": True, "data": {"rd": list(data) if data else []}}
 
 
+# —— SPI bus driver ——
+# A third multi-pin bus, same arbiter rule as I2C/UART: every member (SCK, MOSI,
+# MISO and each CS) is claimed under owner[] = "spi", and releasing any one of
+# them tears the whole bus down, because busio.SPI has no per-pin release.
+#
+# Two properties of the rp2 port shaped this API and both were measured with
+# tools/spi_probe.py on CircuitPython 10.3.1 / Pico 2, not derived from the
+# datasheet (the two disagree about which pins are routable):
+#  * the constructor takes the pins POSITIONALLY, accepts no baudrate= or
+#    half_duplex= keyword, and refuses a bare SCK, so speed and mode are set
+#    afterwards with configure() -- which only works while the bus is locked
+#    ("Function requires lock" otherwise).
+#  * .frequency reports the clock the divider actually reached. rp2 SPI can only
+#    divide the 150 MHz system clock by an even integer, so 75 MHz is the ceiling
+#    and a request for 2 MHz lands on 1973684 Hz. hbaud echoes that truth, exactly
+#    like the PWM hfreq field.
+# CS is not part of busio.SPI on this port: the lines are plain digitalio outputs
+# that idle high and are pulled low around one transaction, which is also what
+# lets one bus serve up to SPI_MAX_CS devices.
+spi_bus = {}  # id -> {"obj": SPI, "sck": n, "mosi": m|-1, "miso": k|-1, "baud": hz,
+#             "hbaud": hz, "mode": 0..3, "cs": [n, ...], "cs_obj": [DigitalOut, ...]}
+
+SPI_MAX_CS = 4
+
+# Which (SCK, MOSI, MISO) sets the port actually accepts, measured by
+# tools/spi_probe.py on CircuitPython 10.3.1 / Pico 2 (rp2350a): the sweep tried
+# every ordered (SCK, partner) pair in both roles, accepted 53 of them, and they
+# fall in exactly two groups; the 100 accepted triples are the cross-product of
+# those groups and 1571 pairs raised "Invalid pins". The groups are also the two
+# SPI peripherals, so two live buses must take one group each -- the port answers
+# "SPI peripheral in use" otherwise. This is a static table like probe_uart()'s,
+# deliberately not a boot-time sweep: the sweep is 1600+ constructor calls and
+# takes minutes, and the answer is a property of the silicon, not of the wiring.
+SPI_GROUPS = [
+    {"sck": [2, 6, 18, 22], "mosi": [3, 7, 19, 23], "miso": [0, 4, 16, 20]},
+    {"sck": [10, 14, 26], "mosi": [11, 15, 27], "miso": [8, 12, 24, 28]},
+]
+
+
+def _spi_group(sck, mosi, miso):
+    # The group a requested pin set belongs to, or None if it spans two groups.
+    # Absent half-bus members (-1) simply do not participate.
+    for g in SPI_GROUPS:
+        ok = sck in g["sck"]
+        if mosi >= 0:
+            ok = ok and mosi in g["mosi"]
+        if miso >= 0:
+            ok = ok and miso in g["miso"]
+        if ok:
+            return g
+    return None
+
+
+def _spi_members(b):
+    return [b["sck"], b["mosi"], b["miso"]] + list(b["cs"])
+
+
+def _spi_bus_on(n):
+    # -1 marks an absent half-bus member, which is stored in the bus record and must
+    # never match a real pin.
+    if n < 0:
+        return None
+    for bid, b in spi_bus.items():
+        if n in _spi_members(b):
+            return bid
+    return None
+
+
+def _spi_free(b):
+    # Drop every claim and every object behind them. Used both for a configured bus
+    # and for a half-built one, so a failed spi_cfg can never leave owner="spi"
+    # pointing at nothing (the pattern that blinds read_state, see pwm_start).
+    for p in _spi_members(b):
+        if p >= 0 and owner[p] == "spi":
+            owner[p] = None
+    for c in b["cs_obj"]:
+        try:
+            c.deinit()
+        except Exception:
+            pass
+    try:
+        b["obj"].deinit()
+    except Exception:
+        pass
+
+
+def _spi_teardown(bid):
+    _spi_free(spi_bus.pop(bid))
+
+
+def spi_release(n):
+    bid = _spi_bus_on(n)
+    if bid is None:
+        return
+    _spi_teardown(bid)
+
+
+def spi_cfg(args):
+    bid = int(args.get("id", 0))
+    sck = int(args.get("sck"))
+    mosi = int(args.get("mosi", -1))
+    miso = int(args.get("miso", -1))
+    cs = [int(x) for x in (args.get("cs") or [])]
+    baud = int(args.get("baud", 100000))
+    mode = int(args.get("mode", 0))
+    if mosi < 0 and miso < 0:
+        raise ValueError("busio.SPI on rp2 needs at least a MOSI or a MISO pin")
+    if not 0 <= mode <= 3:
+        raise ValueError("mode must be 0..3 (CPOL/CPHA)")
+    if len(cs) > SPI_MAX_CS:
+        raise ValueError("at most %d CS lines per bus" % SPI_MAX_CS)
+    for n in [sck, mosi, miso] + cs:
+        if n >= 0 and not 0 <= n < NUM_PINS:
+            raise ValueError("pin out of range")
+    seen = set()
+    for n in [sck, mosi, miso] + cs:
+        if n < 0:
+            continue
+        if n in seen:
+            raise ValueError("one pin cannot hold two SPI roles")
+        seen.add(n)
+    if _spi_group(sck, mosi, miso) is None:
+        raise ValueError(
+            "SPI GP%d(SCK)/GP%d(MOSI)/GP%d(MISO) is not a routable set: rp2 SPI pins "
+            "come in fixed groups, pick all three from one entry of caps.spi.groups"
+            % (sck, mosi, miso)
+        )
+    prev = spi_bus.get(bid)
+    # A pin that another live bus already holds must be refused here, not by
+    # claim(): owner[] says "spi" for both, so the claim would silently succeed and
+    # the digitalio/busio construction afterwards would fail -- and the rollback
+    # would then clear owner[] for a pin the OTHER bus is still driving.
+    for p in [sck, mosi, miso] + cs:
+        ob = _spi_bus_on(p)
+        if ob is not None and ob != bid:
+            raise RuntimeError("GP%d already belongs to SPI bus %d — release it first" % (p, ob))
+    if (
+        prev is not None
+        and prev["sck"] == sck
+        and prev["mosi"] == mosi
+        and prev["miso"] == miso
+        and prev["cs"] == cs
+        and prev["baud"] == baud
+        and prev["mode"] == mode
+    ):
+        return {"ok": True, "data": read_state()}
+    if prev is not None:
+        _spi_teardown(bid)
+    claimed = [n for n in [sck, mosi, miso] + cs if n >= 0]
+    for n in claimed:
+        if not claim(n, "spi", force=True):  # steals gpio/pwm/adc/i2c pins, like pwm
+            raise RuntimeError("pin GP%d busy" % n)
+    try:
+        # positional: (sck, mosi, miso); a half bus passes None for the absent one
+        obj = busio.SPI(
+            _pin(sck),
+            _pin(mosi) if mosi >= 0 else None,
+            _pin(miso) if miso >= 0 else None,
+        )
+    except Exception as e:
+        for n in claimed:
+            if owner[n] == "spi":
+                owner[n] = None
+        # Two live buses need two SPI peripherals; the port says "SPI peripheral
+        # in use" when the pins resolve to an instance that is already taken.
+        raise ValueError("could not build SPI on GP%d/GP%d/GP%d: %s" % (sck, mosi, miso, e))
+    cs_obj = []
+    try:
+        for n in cs:
+            d = digitalio.DigitalInOut(_pin(n))
+            d.switch_to_output(value=True)  # CS idles deasserted
+            cs_obj.append(d)
+        if not obj.try_lock():
+            raise RuntimeError("SPI bus is locked by another holder")
+        try:
+            obj.configure(baudrate=baud, polarity=(mode >> 1) & 1, phase=mode & 1)
+            hbaud = int(obj.frequency)
+        finally:
+            obj.unlock()
+    except Exception as e:
+        _spi_free({"obj": obj, "sck": sck, "mosi": mosi, "miso": miso,
+                   "cs": cs, "cs_obj": cs_obj})
+        raise ValueError("SPI GP%d configure failed: %s" % (sck, e))
+    spi_bus[bid] = {
+        "obj": obj,
+        "sck": sck,
+        "mosi": mosi,
+        "miso": miso,
+        "cs": cs,
+        "cs_obj": cs_obj,
+        "baud": baud,
+        "hbaud": hbaud,
+        "mode": mode,
+    }
+    return {"ok": True, "data": read_state()}
+
+
+def spi_release_cmd(args):
+    bid = int(args.get("id", 0))
+    if bid in spi_bus:
+        _spi_teardown(bid)
+    return {"ok": True, "data": read_state()}
+
+
+def _spi_get(args):
+    b = spi_bus.get(int(args.get("id", 0)))
+    if b is None:
+        raise RuntimeError("no such bus (configure it first)")
+    return b
+
+
+def spi_xfer(args):
+    b = _spi_get(args)
+    obj = b["obj"]
+    w = bytearray([int(x) & 0xFF for x in (args.get("w") or [])])
+    rlen = int(args.get("r", 0))
+    if rlen < 0 or rlen > 4096:
+        raise ValueError("r out of range")
+    if not w and not rlen:
+        raise ValueError("nothing to transfer")
+    csi = int(args.get("cs", 0))
+    if csi >= 0:
+        if csi >= len(b["cs_obj"]):
+            raise ValueError("no CS %d on this bus (it has %d)" % (csi, len(b["cs_obj"])))
+        csn = b["cs_obj"][csi]
+    else:
+        csn = None  # transaction with every CS left high
+    hold = bool(args.get("hold"))
+    rd = b""
+    if rlen and b["miso"] < 0:
+        raise RuntimeError("this bus has no MISO pin — nothing to read")
+    if w and b["mosi"] < 0:
+        raise RuntimeError("this bus has no MOSI pin — nothing to write")
+    if not obj.try_lock():
+        raise RuntimeError("SPI bus is locked by another holder")
+    try:
+        if csn is not None:
+            csn.value = 0
+        if b["mosi"] >= 0 and b["miso"] >= 0:
+            # write_readinto() is the only full-duplex call this port has, and it
+            # wants equal buffers: pad a short write with 0xFF idle clocks, and
+            # hand back only the first rlen bytes of a longer read.
+            n = max(len(w), rlen)
+            tx = bytearray(b"\xff" * n)
+            tx[: len(w)] = w
+            rx = bytearray(n)
+            obj.write_readinto(tx, rx)
+            rd = rx[:rlen]
+        elif b["mosi"] >= 0:
+            obj.write(w)
+        else:
+            buf = bytearray(rlen)
+            obj.readinto(buf)
+            rd = buf
+    finally:
+        if csn is not None and not hold:
+            csn.value = 1
+        obj.unlock()
+    return {
+        "ok": True,
+        "data": {
+            "rd": list(rd),
+            "cs": csi,
+            "held": hold,
+            "hbaud": b["hbaud"],
+            "mode": b["mode"],
+        },
+    }
+
+
 # —— ADC waveform streaming (scope feed) ——
 # While STREAM is active the deadband adc_monitor stays quiet and the
 # adc_streamer task ships whole batches instead: one event per batch keeps
@@ -793,6 +1065,16 @@ def probe_caps():
         "adc": [],
         "i2c_pairs": [],
         "uart": {"tx": [], "rx": [], "pairs": []},
+        # SPI pins are a static measured table (SPI_GROUPS), not a sweep: see the
+        # comment there. baud_ceiling is 150MHz/2, the smallest even divider the
+        # rp2 SPI clock prescaler can produce (measured: .frequency never exceeded
+        # 75000000 no matter how high the request).
+        "spi": {
+            "groups": SPI_GROUPS,
+            "max_buses": 2,
+            "max_cs": SPI_MAX_CS,
+            "baud_ceiling": 75000000,
+        },
         # Which CDC topology the board came up with: true = boot.py enabled the
         # second port and the protocol is on it, false = single-port console
         # fallback. The host needs this to know whether a console port exists.
@@ -867,6 +1149,27 @@ def read_state():
         if b["rx"] >= 0:
             uart_m |= 1 << b["rx"]
         uart_list.append({"id": bid, "tx": b["tx"], "rx": b["rx"], "baud": b["baud"]})
+    spi_m = 0
+    spi_list = []
+    for bid in sorted(spi_bus):
+        b = spi_bus[bid]
+        # CS pins count as owned: a GPIO write to a line that is acting as CS would
+        # drive a device select, and the UI must see it as taken.
+        for p in _spi_members(b):
+            if p >= 0:
+                spi_m |= 1 << p
+        spi_list.append(
+            {
+                "id": bid,
+                "sck": b["sck"],
+                "mosi": b["mosi"],
+                "miso": b["miso"],
+                "cs": b["cs"],
+                "baud": b["baud"],
+                "hbaud": b["hbaud"],
+                "mode": b["mode"],
+            }
+        )
     return {
         "in": read_inputs(),
         "out": out_bits,
@@ -880,6 +1183,8 @@ def read_state():
         "i2c": i2c_list,
         "cfg_uart": uart_m,
         "uart": uart_list,
+        "cfg_spi": spi_m,
+        "spi": spi_list,
         "adc_temp": 1 if temp_on else 0,
         "pwm": pw,
     }
@@ -958,6 +1263,9 @@ COMMANDS = {
     "uart.release": uart_release_cmd,
     "uart.write": uart_write,
     "uart.read": uart_read,
+    "spi.cfg": spi_cfg,
+    "spi.release": spi_release_cmd,
+    "spi.xfer": spi_xfer,
     "sub": cmd_sub,
     "unsub": cmd_unsub,
 }
