@@ -3,7 +3,7 @@
 // reconciliation poll; all function-specific behavior lives in the defs.
 // Adding I2C/SPI later = write a def module and push it into this.defs.
 import type { SerialLink, JsonMsg } from "../serial";
-import { PinModel, SLOTS, TEMP, R_ADC, pinLabel } from "../model/pins";
+import { PinModel, SLOTS, TEMP, R_ADC, R_PWM, R_I2C, R_UART, pinLabel } from "../model/pins";
 import { blankConfig, clearStored, configText, importConfig as importSnapshot, loadConfig, saveConfig } from "../model/store";
 import { t, tf, type MsgKey } from "../i18n";
 import { el } from "./dom";
@@ -155,6 +155,35 @@ export class Workbench {
     // old firmware (or before a reboot) would be skipped by resync forever.
     this.i2c.resetLatch();
     this.uart.resetLatch();
+    this.pruneCaps();
+    this.render();
+  }
+
+  // A binding restored from an earlier session can name a pin the firmware now
+  // connected cannot serve. The device would refuse it on every drift poll, so
+  // the handshake un-binds those pins and names them instead of silently
+  // disagreeing with the board.
+  private pruneCaps(): void {
+    const dropped = this.model.pruneAgainstCaps();
+    if (!dropped.length) return;
+    // Stopping the driver clears its pending send for a pin that is now in the
+    // pool; the device owns nothing on these pins, so the reply is a no-op ok.
+    for (const d of dropped) {
+      if (d.role === R_ADC) this.adc.stop(d.pin);
+      else if (d.role === R_PWM) this.pwm.stop(d.pin);
+    }
+    const byRole: Record<number, MsgKey> = {
+      [R_PWM]: "cfg_pruned_pwm",
+      [R_ADC]: "cfg_pruned_adc",
+      [R_I2C]: "cfg_pruned_i2c",
+      [R_UART]: "cfg_pruned_uart",
+    };
+    const groups = new Map<number, string>();
+    for (const d of dropped) {
+      groups.set(d.role, (groups.get(d.role) ?? "") + pinLabel(d.pin) + " ");
+    }
+    for (const [role, list] of groups) this.onNote(tf(byRole[role] ?? "cfg_pruned_pin", list.trim()));
+    this.model.changed();
     this.render();
   }
 
@@ -171,6 +200,9 @@ export class Workbench {
   importConfig(text: string): number {
     const n = importSnapshot(this.model, text);
     this.afterConfigChange();
+    // A file may come from another board: with a live link the freshly loaded
+    // bindings are checked against the caps we already know.
+    if (this.link.state === "ready") this.pruneCaps();
     return n;
   }
 

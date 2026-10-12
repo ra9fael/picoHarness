@@ -134,6 +134,66 @@ export class PinModel extends Emitter {
     return this.pwmCaps !== null;
   }
 
+  // A persisted binding may name a pin or a pair the firmware now connected
+  // cannot serve — a different board, or a caps table that changed since the
+  // config was written. Such a binding can never take effect, and the drift
+  // poll would re-issue it for as long as the link lives, so the handshake
+  // drops those pins back to the pool and reports them. Nothing is sent to the
+  // device: a fresh program owns no resources yet. Unknown caps reject nothing
+  // — every predicate below answers "yes" until the firmware tells us otherwise.
+  pruneAgainstCaps(): { pin: number; role: number }[] {
+    const dropped: { pin: number; role: number }[] = [];
+    const dropPin = (n: number): void => {
+      const role = this.roles[n];
+      if (role === R_PWM) this.pwm[n] = null;
+      if (role === R_ADC) this.resetAdc(n);
+      this.roles[n] = 0;
+      this.pinBus[n] = -1;
+      this.uartPinBus[n] = -1;
+      dropped.push({ pin: n, role });
+    };
+    for (let n = 0; n < SLOTS; n++) {
+      const role = this.roles[n];
+      if (role === R_PWM && !this.pwmCap(n)) dropPin(n);
+      else if (role === R_ADC && !this.adcCap(n)) dropPin(n);
+      else if (n === TEMP && role !== 0 && role !== R_ADC) dropPin(n);
+    }
+    // Half a bus stays half a bus: only the offending line is released, so the
+    // card survives and the user can drop in a legal partner.
+    for (const b of this.buses) {
+      if (b.scl >= 0 && !this.i2cRoleCap(b.scl, "scl")) this.releaseBusLine(b.id, "scl", dropped);
+      if (b.sda >= 0 && !this.i2cRoleCap(b.sda, "sda")) this.releaseBusLine(b.id, "sda", dropped);
+      if (b.scl >= 0 && b.sda >= 0 && !this.i2cPairOk(b.scl, b.sda))
+        this.releaseBusLine(b.id, "sda", dropped);
+    }
+    for (const b of this.uartBuses) {
+      if (b.tx >= 0 && !this.uartRoleCap(b.tx, "tx")) this.releaseUartLine(b.id, "tx", dropped);
+      if (b.rx >= 0 && !this.uartRoleCap(b.rx, "rx")) this.releaseUartLine(b.id, "rx", dropped);
+      // An unroutable pair loses its RX line: the transmit half usually stays
+      // useful, and the pair is what the hardware actually forbids.
+      if (b.tx >= 0 && b.rx >= 0 && !this.uartPairOk(b.tx, b.rx))
+        this.releaseUartLine(b.id, "rx", dropped);
+    }
+    if (dropped.length) this.emit("config");
+    return dropped;
+  }
+
+  private releaseBusLine(busId: number, which: "scl" | "sda", into: { pin: number; role: number }[]): void {
+    const b = this.busById(busId);
+    const pin = b ? (which === "scl" ? b.scl : b.sda) : -1;
+    if (pin < 0) return;
+    this.setBusSlot(busId, which, -1);
+    into.push({ pin, role: R_I2C });
+  }
+
+  private releaseUartLine(busId: number, which: "tx" | "rx", into: { pin: number; role: number }[]): void {
+    const b = this.busUartById(busId);
+    const pin = b ? (which === "tx" ? b.tx : b.rx) : -1;
+    if (pin < 0) return;
+    this.setUartSlot(busId, which, -1);
+    into.push({ pin, role: R_UART });
+  }
+
   // True once the firmware has reported the I2C pair table, so the UI can show
   // SCL/SDA badges; before that the predicates are permissive but silent.
   get i2cPairKnown(): boolean {
