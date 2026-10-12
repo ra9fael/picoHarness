@@ -100,7 +100,8 @@ After a successful connection:
   on **Attach log port** is left to do. On a dual-CDC board the page attaches the log port by itself right after the
   handshake, so normally you touch nothing.
 - The console below prints the handshake.
-- The pin chips on the workbench gain capability badges (P = PWM, A = ADC, S/D = I2C, T/R = UART).
+- The pin chips on the workbench gain capability badges (P = PWM, A = ADC, S/D = I2C, T/R = UART,
+  CK/DO/DI = SPI); [§4.1 Reading the badges](#41-reading-the-badges) explains each one.
 
 Those badges come **from the board itself**; they are not hardcoded in the page. Swap in another board, or let some other owner
 claim a pin, and the UI reflects it truthfully. You never get a pin that looks usable but is not.
@@ -137,6 +138,7 @@ Binding a pin has two forms, pick whichever you prefer:
 | Click a chip, then click the lane | Same |
 | Click the × on a chip | Releases that pin |
 | Drag a chip back into the pin pool | Same |
+| Click an **empty slot** on a bus card, then a glowing chip | Same, and this way you do not have to remember what fits |
 
 There is one rule: **a pin belongs to one function at a time**. Drag a pin that is already doing PWM into the ADC lane and it
 leaves the PWM lane by itself; you do not unbind it first. The firmware does this arbitration, so two people can keep two pages
@@ -144,7 +146,48 @@ open against the same board without both believing the pin is theirs.
 
 Every change **takes effect immediately and is sent to the board**. There is no Save or Apply button.
 
-### 4.1 Digital Input
+### 4.1 Reading the badges
+
+A badge letter is one caps table the firmware reported, unfolded per pin:
+
+| Badge | Meaning | Which table |
+| --- | --- | --- |
+| `P` | this pin is in the firmware PWM caps table | `caps.pwm` |
+| `A` | this pin can be read as an ADC channel | `caps.adc` |
+| `S` | I2C SCL only: it is an odd-numbered pin | `caps.i2c_pairs` |
+| `D` | I2C SDA only: it is an even-numbered pin | `caps.i2c_pairs` |
+| `T` | UART TX: even-numbered pins | `caps.uart.tx` |
+| `R` | UART RX: odd-numbered pins | `caps.uart.rx` |
+| `CK` | can be an SPI SCK | the `sck` row of one `caps.spi.groups` entry |
+| `DO` | can be an SPI MOSI, controller transmits | the `mosi` row of one `caps.spi.groups` entry |
+| `DI` | can be an SPI MISO, controller receives | the `miso` row of one `caps.spi.groups` entry |
+
+Hover a badge and the tooltip says exactly what the table above says, e.g.
+`CK = can be an SPI SCK (the sck row of one caps.spi.groups entry)`.
+
+Four ways this gets misread:
+
+- **A missing badge does not mean the pin cannot be used.** When the firmware never reported a table, its letters are missing
+  from every chip — an old build without `caps.spi` lights no CK/DO/DI at all, yet the SPI lane still goes by whatever the
+  device answers. If the badges thin out, check whether that table is in `caps`.
+- A badge says which line this pin sits on in a bus, not what the pin is limited to. One chip can read `P A D T`.
+- CK/DO/DI never stack on one chip (each row of the rp2 function table gives a pin exactly one SPI role). **CS carries no
+  badge**: the firmware drives chip select as an ordinary output, so any free GP can be a CS.
+- The badges do not show pin *groups*. `CK` only says this pin can be a clock on some group; whether two pins you picked
+  belong to one group is what the pool highlight answers — click an empty slot, glowing chips fit, dimmed ones the firmware
+  refuses.
+
+Bus lanes have the reverse usage too: click an **empty slot** on a card and the pool answers for
+itself — every chip that slot could legally take glows, the rest dim, and the hint reads `SCL slot
+selected — click a glowing GP chip to bind it; dimmed pins are the ones the firmware refuses; click
+empty space to cancel`. The second click on a glowing chip binds it; clicking empty space drops the
+focus; clicking a slot that already holds a pin releases that pin instead of focusing it. The
+verdict comes from the very same caps table a drop is checked against, so a glowing chip always
+fits — I2C evaluates it as a pair (with SCL on GP29 only the even pins on that same peripheral
+light up), and UART evaluates it per instance (after TX=GP28, RX offers only 1/3/13/15/17/19/29 —
+GP27 sits on the other UART, so the page dims it).
+
+### 4.2 Digital Input
 
 Drag a pin into the digital input lane. A small dot appears on the chip and follows the pin level in real time (lit = high).
 
@@ -153,11 +196,11 @@ Click the dropdown on the chip to choose pull-up / pull-down / none. The default
 Level changes are pushed by the board to the page, so the response is fast. The page also reconciles once per second, so if the
 board was rebooted the configuration is replayed back to it automatically.
 
-### 4.2 Digital Output
+### 4.3 Digital Output
 
 Drag a pin into the digital output lane. A clickable level block appears on the chip; click it to toggle between high and low.
 
-### 4.3 PWM
+### 4.4 PWM
 
 Drag a pin into the PWM lane, then set the frequency and the duty cycle.
 
@@ -187,7 +230,7 @@ case: compute it from the table instead of trying. Asking the second pin for a d
 hands that pin back to the pool and the UI shows the command as failed. When you need two independent
 frequencies, pick pins that compute to different slices (GP7 is slice 3, GP11 is slice 5).
 
-### 4.4 ADC
+### 4.5 ADC
 
 Drag a pin into the ADC lane. The chip displays the voltage directly. Click the number to cycle between V, mV, and raw.
 
@@ -203,7 +246,7 @@ it really reads. The UI lights the badge from `caps.adc`, so a different board o
 The ADC lane also accepts a special **TEMP** chip, which sits at the end of the pin pool. It is the on-die temperature sensor.
 It displays degrees Celsius by default. It occupies no physical pin and can run at the same time as other ADC channels.
 
-### 4.5 I2C
+### 4.6 I2C
 
 I2C, UART and SPI are bus functions, so their UI is different: a lane holds **bus cards** rather than single pins.
 
@@ -228,7 +271,7 @@ runs raw transactions (fill in the slave address, the bytes to write, and the by
 On a new setup, scan first. An empty scan usually means no wiring or no pull-ups: an I2C bus needs pull-up resistors that hold
 both lines high when idle. Many sensor modules carry them; bare chips do not.
 
-### 4.6 UART
+### 4.7 UART
 
 Also a bus card, with two slots: TX and RX.
 
@@ -250,7 +293,7 @@ claimed by the CircuitPython console, so any use failed with `GP1 in use`; on th
 check passes — `uart.cfg tx=0 rx=1` builds the bus (retested at 0.1.14). So they appear in `caps.uart.tx/rx/pairs`
 as normal, and the GP0/GP1 chips in the pool light up their T / R badges again.
 
-### 4.7 Live UART Terminal
+### 4.8 Live UART Terminal
 
 The Read button on a card is too clumsy for streaming serial data. So the console area has a row of tabs above it: **Console** is
 the device output mirror (the raw bytes of the data port, or of the console port once you attach a log port), and each UART you
@@ -267,10 +310,14 @@ Only the tab on screen receives data. Switch away and the push stops, so nothing
 
 The Clear / Copy / Export buttons at the top follow the current tab: clear a UART tab and you clear that terminal.
 
-### 4.8 SPI
+### 4.9 SPI
 
 Also a bus card, only with more pins: **SCK, MOSI, MISO** data slots plus up to four chip
 selects **CS0..CS3** (the number comes from `caps.spi.max_cs`).
+
+The `CK/DO/DI` badges on the chips are exactly those three data roles (see
+[§4.1 Reading the badges](#41-reading-the-badges)). **CS carries no badge**: the firmware drives
+chip select as an ordinary output, so any free GP can be a CS.
 
 Like UART, a half bus is legal: **a bus without MOSI or without MISO still configures**, so
 transmit-only or receive-only are both normal. But **SCK is mandatory**, and at least one

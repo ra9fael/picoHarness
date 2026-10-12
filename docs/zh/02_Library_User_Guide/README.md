@@ -232,7 +232,7 @@ rp2 的分频器做不到你想要的每一个整数频率：它只能跑 125 MH
 
 同一 slice 的两个脚（如 GP24/GP25 = slice 4，按 `(n // 2) mod 8` 算）不能各自设频率：第二个 `pwm.cfg`
 直接失败并回 `RuntimeError: Conflicting settings for shared resource`，
-固件此时会退还该脚的所有权，不会留下半占用的引脚。详见 [01 手册](../01_GUIApp_FW_Manual/README.md#43-pwm)。
+固件此时会退还该脚的所有权，不会留下半占用的引脚。详见 [01 手册](../01_GUIApp_FW_Manual/README.md#44-pwm)。
 
 ### 3.4 ADC
 

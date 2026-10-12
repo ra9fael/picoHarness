@@ -5,6 +5,31 @@ repository commit. UI and firmware must be used as a matched pair: an old firmwa
 recognise new commands and answers "unknown cmd".
 
 
+[20261013 ui-bus-badges]
+
+Firmware version unchanged (0.1.17-gp29); this entry is host-side only.
+
+Clicking an empty slot on a bus card now lights the pool from the slot's side: chips the slot can
+legally take glow, the rest dim, and the glow uses the same caps table a drop is checked against,
+so a glowing chip always fits. I2C evaluates it as a pair (with SCL on GP29 only the even pins on
+that same peripheral light up); UART evaluates it per instance (after TX=GP28 the RX slot offers
+only 1/3/13/15/17/19/29 — GP27 belongs to the other UART, so the page dims it, which is exactly
+the rule that makes `UART(TX=28, RX=27)` raise Invalid pins on real hardware); SPI evaluates it
+per pin group (with SCK=GP2 the MISO slot keeps 0/4/16/20 and dims the cross-group 8/12/28). A
+second click on a glowing chip binds it; clicking empty space drops the focus; clicking a slot that
+already holds a pin releases that pin rather than focusing it.
+
+The chip badges gain the three SPI data roles: CK / DO / DI, from the sck / mosi / miso rows of
+caps.spi.groups. Every letter carries a tooltip naming the table it came from. A badge only appears
+when the device actually reported that table, so against an old firmware all three SPI letters are
+missing at once — that does not mean the pins are unusable, and 01 §4.1 now separates "no badge"
+from "cannot use". CS has no badge: the firmware drives chip select as an ordinary output, so any
+free GP can be one.
+
+01 gains §4.1 "Reading the badges" (a badge → caps field table plus the four easiest misreadings);
+the rest of §4 shifts to 4.2..4.9 and the PWM anchor in 02 moved to #44-pwm.
+
+
 [20261013 0.1.17-gp29]
 
 GP29 on the Pico 2 joined the pool. It is never spelled "GP29" — the board table declares it only

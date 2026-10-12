@@ -156,7 +156,7 @@ When the frequency changes, the firmware `deinit`s the object and rebuilds it. O
 
 The rp2 divider cannot honour every integer you ask for: it only generates 125 MHz/(div×(top+1)), so the measured floor is 9 Hz (1..8 Hz all land on 9) and higher requests quantize (1000→990, 2000→2035). The reply therefore carries `pwm.<pin>.hfreq` = the frequency the slice really runs at, next to `freq` = what you requested; the UI turns the box amber and writes one log line when they differ.
 
-Two pins of one slice (GP24/GP25 = slice 4, since slice = `(n // 2) mod 8`) cannot hold separate frequencies: the second `pwm.cfg` fails with `RuntimeError: Conflicting settings for shared resource`, and the firmware hands the pin's ownership back instead of leaving it half-claimed. See [01 User Manual](../01_GUIApp_FW_Manual/README.md#43-pwm).
+Two pins of one slice (GP24/GP25 = slice 4, since slice = `(n // 2) mod 8`) cannot hold separate frequencies: the second `pwm.cfg` fails with `RuntimeError: Conflicting settings for shared resource`, and the firmware hands the pin's ownership back instead of leaving it half-claimed. See [01 User Manual](../01_GUIApp_FW_Manual/README.md#44-pwm).
 
 ### 3.4 ADC
 
