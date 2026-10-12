@@ -205,6 +205,62 @@ btnLang.addEventListener("click", () => {
   applyStaticLabels();
 });
 
+// Config menu: the saved snapshot is the same one localStorage holds, so export
+// and import round-trip through it and the drift path does the device side.
+const cfgWrap = $("cfg-wrap");
+const btnConfig = $("btn-config") as HTMLButtonElement;
+btnConfig.addEventListener("click", (e) => {
+  e.stopPropagation();
+  cfgWrap.classList.toggle("open");
+});
+document.addEventListener("click", (e) => {
+  if (cfgWrap.classList.contains("open") && !cfgWrap.contains(e.target as Node))
+    cfgWrap.classList.remove("open");
+});
+
+function stamp(): string {
+  const d = new Date();
+  const p = (n: number) => String(n).padStart(2, "0");
+  return `${d.getFullYear()}${p(d.getMonth() + 1)}${p(d.getDate())}-${p(d.getHours())}${p(
+    d.getMinutes()
+  )}${p(d.getSeconds())}`;
+}
+
+$("cfg-export").addEventListener("click", () => {
+  cfgWrap.classList.remove("open");
+  const name = `picoharness-config-${stamp()}.json`;
+  const a = document.createElement("a");
+  a.href = URL.createObjectURL(new Blob([wb.exportConfig()], { type: "application/json" }));
+  a.download = name;
+  a.click();
+  setTimeout(() => URL.revokeObjectURL(a.href), 5000);
+  consolePanel.note(tf("cfg_exported", name));
+});
+
+$("cfg-import").addEventListener("click", () => {
+  cfgWrap.classList.remove("open");
+  const input = document.createElement("input");
+  input.type = "file";
+  input.accept = ".json,application/json";
+  input.onchange = async () => {
+    const f = input.files && input.files[0];
+    if (!f) return;
+    try {
+      consolePanel.note(tf("cfg_imported", wb.importConfig(await f.text())));
+    } catch (e: any) {
+      consolePanel.note(tf("cfg_import_fail", e.message));
+    }
+  };
+  input.click();
+});
+
+$("cfg-reset").addEventListener("click", () => {
+  cfgWrap.classList.remove("open");
+  if (!confirm(t("cfg_reset_confirm"))) return;
+  wb.resetConfig();
+  consolePanel.note(t("cfg_reset_done"));
+});
+
 $("btn-clear").addEventListener("click", () => {
   if (uartTerms.uartActive()) uartTerms.clearActive();
   else consolePanel.clear();

@@ -407,6 +407,23 @@ main { padding: 16px; }
 }
 #console-bar button { padding: 3px 10px; font-size: 12px; }
 #btn-rawstream.on { color: var(--accent); border-color: var(--accent); }
+#cfg-wrap { position: relative; }
+#cfg-menu {
+  display: none;
+  position: absolute;
+  top: calc(100% + 4px);
+  right: 0;
+  z-index: 40;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 170px;
+  background: var(--panel);
+  border: 1px solid var(--accent);
+  padding: 4px;
+}
+#cfg-wrap.open #cfg-menu { display: flex; }
+#cfg-menu button { text-align: left; font: 12px var(--mono); padding: 4px 8px; }
+.cfg-note { color: var(--dim); font: 11px var(--mono); padding: 4px 8px; }
 #console-bar .label { color: var(--dim); }
 #mode-tag {
   color: var(--accent);

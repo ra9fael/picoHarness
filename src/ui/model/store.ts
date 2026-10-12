@@ -20,7 +20,9 @@ export type PinSnap = {
 export type BusSnap = { id: number; sda: number; scl: number; freq: number };
 export type UartSnap = { id: number; tx: number; rx: number; baud: number };
 
-export function saveConfig(model: PinModel): void {
+export type Snapshot = { v: number; pins: PinSnap[]; buses: BusSnap[]; uarts: UartSnap[] };
+
+export function snapshotOf(model: PinModel): Snapshot {
   const pins: PinSnap[] = [];
   for (let n = 0; n < SLOTS; n++) {
     const r = model.roles[n];
@@ -37,20 +39,19 @@ export function saveConfig(model: PinModel): void {
   }
   const buses: BusSnap[] = model.buses.map((b) => ({ ...b }));
   const uarts: UartSnap[] = model.uartBuses.map((b) => ({ ...b }));
+  return { v: 1, pins, buses, uarts };
+}
+
+export function saveConfig(model: PinModel): void {
   try {
-    localStorage.setItem(KEY, JSON.stringify({ v: 1, pins, buses, uarts }));
+    localStorage.setItem(KEY, JSON.stringify(snapshotOf(model)));
   } catch {}
 }
 
-// Replaces the whole model config with the stored one; returns pin count.
-export function loadConfig(model: PinModel): number {
-  let obj: any;
-  try {
-    obj = JSON.parse(localStorage.getItem(KEY) || "null");
-  } catch {
-    return 0;
-  }
-  if (!obj || !Array.isArray(obj.pins)) return 0;
+// Replaces the whole model config with a parsed snapshot; returns the number of
+// entries applied. Unknown or malformed fields are skipped rather than trusted —
+// the file comes from another browser, and the device is the final arbiter.
+function applySnapshot(model: PinModel, obj: any): number {
   model.roles.fill(0);
   model.pulls.fill(0);
   model.pwm.fill(null);
@@ -110,4 +111,39 @@ export function loadConfig(model: PinModel): number {
     }
   }
   return count;
+}
+
+// Replaces the model config with the stored one; returns the number applied.
+export function loadConfig(model: PinModel): number {
+  let obj: any;
+  try {
+    obj = JSON.parse(localStorage.getItem(KEY) || "null");
+  } catch {
+    return 0;
+  }
+  if (!obj || !Array.isArray(obj.pins)) return 0;
+  return applySnapshot(model, obj);
+}
+
+// Read a config file the user picked. Throws on unreadable input so the caller
+// can say so instead of silently applying half a file.
+export function importConfig(model: PinModel, text: string): number {
+  const obj = JSON.parse(text);
+  if (!obj || !Array.isArray(obj.pins)) throw new Error("not a PicoHarness config file");
+  return applySnapshot(model, obj);
+}
+
+// Pretty-printed, so an exported file stays hand-editable.
+export function configText(model: PinModel): string {
+  return JSON.stringify(snapshotOf(model), null, 2);
+}
+
+export function clearStored(): void {
+  try {
+    localStorage.removeItem(KEY);
+  } catch {}
+}
+
+export function blankConfig(model: PinModel): void {
+  applySnapshot(model, { pins: [], buses: [], uarts: [] });
 }

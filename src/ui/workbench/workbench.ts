@@ -4,7 +4,7 @@
 // Adding I2C/SPI later = write a def module and push it into this.defs.
 import type { SerialLink, JsonMsg } from "../serial";
 import { PinModel, SLOTS, TEMP, R_ADC, pinLabel } from "../model/pins";
-import { loadConfig, saveConfig } from "../model/store";
+import { blankConfig, clearStored, configText, importConfig as importSnapshot, loadConfig, saveConfig } from "../model/store";
 import { t, tf, type MsgKey } from "../i18n";
 import { el } from "./dom";
 import type { FuncApi, FunctionDef } from "./types";
@@ -160,6 +160,29 @@ export class Workbench {
 
   onEvent(m: JsonMsg): void {
     this.model.applyEvent(m);
+  }
+
+  // Config menu. An imported file goes through the same snapshot the browser
+  // already stores, so the normal save + drift path pushes it to the device.
+  exportConfig(): string {
+    return configText(this.model);
+  }
+
+  importConfig(text: string): number {
+    const n = importSnapshot(this.model, text);
+    this.afterConfigChange();
+    return n;
+  }
+
+  resetConfig(): void {
+    blankConfig(this.model);
+    this.afterConfigChange();
+    clearStored();
+  }
+
+  private afterConfigChange(): void {
+    this.model.emit("config");
+    this.render();
   }
 
   // Coalesce bursts of edits into one localStorage write per quiet window.
