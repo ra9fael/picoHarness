@@ -96,6 +96,26 @@
 
   var data = makePort("data", true);
   var cons = makePort("console", false);
+  // What a CircuitPython console really has queued when a host opens it: the
+  // boot banner and a prompt. It also gives the UI something to rank by when it
+  // has to choose which silent port to kick (see byChatter).
+  cons.push(enc.encode("Adafruit CircuitPython 10.3.1 on 2026-10-01; Raspberry Pi Pico 2 with RP2350\n>>> "));
+  // window.__MOCK_STOPPED = code.py is not running: no port answers a ping until
+  // the host sends Ctrl+D on the console port, exactly like the real board.
+  if (window.__MOCK_STOPPED) {
+    data.stopped = true;
+    var origWrite = cons.onWrite;
+    cons.onWrite = function (chunk) {
+      var s = dec.decode(chunk);
+      if (s.indexOf("\x04") >= 0) data.stopped = false;
+      origWrite.call(cons, chunk);
+    };
+    var origReply = data.reply;
+    data.reply = function (line) {
+      if (data.stopped) return;
+      origReply.call(data, line);
+    };
+  }
   // window.__MOCK_SINGLE = a board without boot.py: one port carries everything,
   // so the UI must keep mirroring the protocol port.
   var single = !!window.__MOCK_SINGLE;

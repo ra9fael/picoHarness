@@ -7,7 +7,7 @@
 // roles share the single port and this class collapses back to one transport.
 import { Transport } from "./core/transport";
 import { Rpc } from "./core/rpc";
-import { askNewPort, findProtocolPort, grantedPorts, probePort } from "./core/ports";
+import { askNewPort, byChatter, findProtocolPort, forgetRoles, grantedPorts, probePort } from "./core/ports";
 import type { PortRole } from "./core/ports";
 import { t } from "./i18n";
 import type { JsonMsg, LinkState } from "./types";
@@ -103,8 +103,8 @@ export class SerialLink {
     if (usb) this.capsUsbData = !!usb.data;
   }
 
-  // Find the protocol port (already-authorized ones first, the picker only if
-  // none answers), open it, and get the device description.
+  // Find the protocol port (already-authorized ones first, the picker only when
+  // the browser holds no grant), open it, and get the device description.
   async connect(): Promise<JsonMsg> {
     this.setState("connecting");
     let found = await findProtocolPort();
@@ -112,10 +112,12 @@ export class SerialLink {
       // Nothing answered a ping, so code.py is not running (stopped at the REPL
       // or crashed). Ctrl+C/Ctrl+D on a console port restarts it, then look
       // again — the protocol port only ever answers once the program is up.
-      // The retry opens the picker a second time, so say so first.
-      this.onHint(t("hint_second_picker"));
-      const cand = found.others[0] ?? (await askNewPort());
-      await this.kick(cand);
+      this.onHint(t("hint_kick"));
+      await this.kick(byChatter(found.others)[0]);
+      // Restarting the device program is the one event that can turn a silent
+      // port into the protocol port, so the verdicts that just failed are no
+      // longer evidence.
+      forgetRoles(found.others);
       found = await findProtocolPort();
     }
     if (!found.port) throw new Error(t("err_no_protocol_port"));

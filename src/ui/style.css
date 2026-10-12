@@ -49,6 +49,14 @@ h1 { font-size: 15px; margin: 0 auto 0 0; font-weight: 600; }
 }
 #status.ok { color: var(--accent); border-color: var(--accent); }
 #status.bad { color: var(--err); border-color: var(--err); }
+#legacy-warn {
+  font: 12px/1.4 var(--mono);
+  color: var(--warn);
+  background: var(--panel);
+  border: 1px solid var(--warn);
+  padding: 6px 10px;
+  margin-bottom: 12px;
+}
 button {
   background: var(--btn-bg);
   color: var(--btn-fg);

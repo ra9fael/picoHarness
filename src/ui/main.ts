@@ -17,6 +17,7 @@ const btnRaw = $("btn-rawstream") as HTMLButtonElement;
 const btnLang = $("btn-lang") as HTMLButtonElement;
 const btnCollapse = $("btn-collapse") as HTMLButtonElement;
 const statusEl = $("status");
+const legacyWarn = $("legacy-warn");
 
 let linkState: LinkState = "closed";
 const hasSerial = "serial" in navigator;
@@ -86,6 +87,9 @@ function syncUi() {
   btnLog.title = link.dualCdc ? "" : t("logport_need_dual");
   btnRaw.classList.toggle("on", consolePanel.rawStreamOn());
   btnRaw.title = t("raw_hint");
+  // Standing banner, not a one-off note: a single-port board keeps the old
+  // behaviour for this release, and the user should see that while it works.
+  legacyWarn.hidden = !(linkState === "ready" && !link.dualCdc);
   btnPing.disabled = btnEcho.disabled = linkState !== "ready" || consolePanel.mode !== "monitor";
   wb.setActive(linkState === "ready" && consolePanel.mode === "monitor");
   scope.setActive(linkState === "ready" && consolePanel.mode === "monitor");

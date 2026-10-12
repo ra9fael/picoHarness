@@ -46,7 +46,9 @@ const dict = {
     st_single: "单口·旧模式",
     st_log_on: "日志口 ✓",
     st_log_off: "日志口未连接",
-    hint_second_picker: "已授权的端口里没有协议口：正在重启设备程序，之后可能再弹一次端口选择框",
+    hint_kick: "已授权的端口都不回应协议 ping：正在重启设备程序，然后重新寻找协议端口",
+    warn_legacy:
+      "旧模式：板子只有一个 CDC 口，设备的 print 与协议字节共用它。把 boot.py 放进 CIRCUITPY 盘并按 RESET 硬复位即可分成两个口；下一版本将不再支持单口模式。",
     hint_logport_missing: "日志口未授权：想看设备的 print 与报错，点“连接日志口”再选剩下的那个端口",
     logport_need_dual: "单口板子没有独立的控制台端口；装上 boot.py 并按 RESET 硬复位后才有日志口",
     welcome: "PicoHarness 调试控制台 — 设备原始输出镜像",
@@ -84,7 +86,8 @@ const dict = {
     logport_fail: "日志口连接失败: {0}",
     log_port_lost: "日志口已断开",
     ready_again: "设备程序已重启: {0}",
-    err_no_protocol_port: "未找到协议端口：所有端口都不应答 ping，重启设备程序后仍然如此",
+    err_no_protocol_port:
+      "未找到协议端口：已授权的端口都不回应 ping（现象）。CIRCUITPY 盘上缺少本工具的 code.py，或 boot.py 改动后没按 RESET 硬复位（原因）。按板上 RESET 等几秒后点“连接设备”；仍失败就把 src/fw 下的 boot.py 与 code.py 重新拷进 CIRCUITPY 盘（下一步）",
     err_console_is_protocol: "该端口应答了协议 ping，它是数据口而不是控制台",
     err_same_port: "该端口已作为数据口连接，请选 CircuitPython 控制台口",
     wb_help:
@@ -194,8 +197,10 @@ const dict = {
     st_single: "single port (legacy)",
     st_log_on: "log port ✓",
     st_log_off: "log port not attached",
-    hint_second_picker:
-      "None of the authorized ports is the protocol port: restarting the device program, then asking for one more port",
+    hint_kick:
+      "None of the authorized ports answers the protocol ping: restarting the device program, then looking for the protocol port again",
+    warn_legacy:
+      "Legacy mode: this board exposes one CDC port, so the device's print() output shares it with the protocol. Put boot.py on CIRCUITPY and press RESET (hard reset) to split it in two; single-port mode is not supported in the next release.",
     hint_logport_missing:
       "Log port not authorized — click Attach log port to also see the device's print() output and tracebacks",
     logport_need_dual:
@@ -235,7 +240,8 @@ const dict = {
     logport_fail: "Log port attach failed: {0}",
     log_port_lost: "log port closed",
     ready_again: "device program restarted: {0}",
-    err_no_protocol_port: "No protocol port found: nothing answered the ping, even after restarting the device program",
+    err_no_protocol_port:
+      "No protocol port found: none of the authorized ports answers the ping (what you see). The tool's code.py is missing from the CIRCUITPY drive, or boot.py was edited without the hard reset it needs (why). Press RESET on the board, wait a few seconds, then click Connect; if it still fails, copy boot.py and code.py from src/fw onto the CIRCUITPY drive (next step).",
     err_console_is_protocol: "That port answered the protocol ping — it is the data port, not the console",
     err_same_port: "That port is already open as the data port — pick the CircuitPython console port",
     wb_help:
