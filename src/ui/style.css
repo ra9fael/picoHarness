@@ -122,6 +122,17 @@ main { padding: 16px; }
 }
 .chip b { font-weight: 600; }
 .chip.sel { border-color: var(--accent); background: #26313c; }
+/* Reverse highlight: a focused bus-card slot paints the pool. Glow = this slot
+   will take the pin, dim = the firmware would refuse it. The k-* class on the
+   pool carries the owning lane's accent so the glow names the lane. */
+.chip.compat { border-color: var(--accent); background: #26313c; cursor: copy; }
+.chip.dim { opacity: 0.32; }
+.wb-pool.k-i2c .chip.compat { border-color: var(--c-i2c); background: #12211f; }
+.wb-pool.k-i2c .chip.compat b { color: var(--c-i2c); }
+.wb-pool.k-uart .chip.compat { border-color: var(--c-uart); background: #221a12; }
+.wb-pool.k-uart .chip.compat b { color: var(--c-uart); }
+.wb-pool.k-spi .chip.compat { border-color: var(--c-spi); background: #1f1620; }
+.wb-pool.k-spi .chip.compat b { color: var(--c-spi); }
 .chip .caps { font-size: 9px; color: var(--dim); letter-spacing: 1px; }
 .chip .mini {
   background: none;
@@ -223,6 +234,8 @@ main { padding: 16px; }
   cursor: copy;
 }
 .i2c-slot.compat .i2c-slot-val { color: var(--c-i2c); }
+.i2c-slot.focus { border-color: var(--c-i2c); border-style: solid; background: #0d1a18; }
+.i2c-slot.focus .i2c-slot-tag { color: var(--c-i2c); }
 .i2c-slot-tag { color: var(--dim); letter-spacing: 1px; }
 .i2c-slot-val { color: var(--fg); cursor: pointer; }
 .i2c-slot.filled .i2c-slot-val:hover { color: var(--err); }
@@ -289,6 +302,8 @@ main { padding: 16px; }
   cursor: copy;
 }
 .uart-slot.compat .uart-slot-val { color: var(--c-uart); }
+.uart-slot.focus { border-color: var(--c-uart); border-style: solid; background: #1a140d; }
+.uart-slot.focus .uart-slot-tag { color: var(--c-uart); }
 .uart-slot-tag { color: var(--dim); letter-spacing: 1px; }
 .uart-slot-val { color: var(--fg); cursor: pointer; }
 .uart-slot.filled .uart-slot-val:hover { color: var(--err); }
@@ -356,6 +371,8 @@ main { padding: 16px; }
   cursor: copy;
 }
 .spi-slot.compat .spi-slot-val { color: var(--c-spi); }
+.spi-slot.focus { border-color: var(--c-spi); border-style: solid; background: #170f16; }
+.spi-slot.focus .spi-slot-tag { color: var(--c-spi); }
 .spi-slot-tag { color: var(--dim); letter-spacing: 1px; }
 .spi-slot-val { color: var(--fg); cursor: pointer; }
 .spi-slot.filled .spi-slot-val:hover { color: var(--err); }

@@ -140,8 +140,12 @@ export class Workbench {
       });
     }
     document.addEventListener("click", (e) => {
-      if (this.model.sel !== null && !mount.contains(e.target as Node)) {
+      if (
+        (this.model.sel !== null || this.model.slotSel !== null) &&
+        !mount.contains(e.target as Node)
+      ) {
         this.model.sel = null;
+        this.model.slotSel = null;
         this.render();
       }
     });
@@ -353,8 +357,14 @@ export class Workbench {
       c.appendChild(x);
     }
     if (this.model.sel === n) c.classList.add("sel");
+    // Reverse highlight: while a bus-card slot is focused, every chip is painted
+    // by whether that slot could legally take it — glow means the drop or click
+    // will work, dim means the firmware would refuse it.
+    const slotOk = this.model.slotSelAccepts(n);
+    if (slotOk !== null) c.classList.add(slotOk ? "compat" : "dim");
     c.addEventListener("dragstart", (e) => {
       this.model.sel = n;
+      this.model.slotSel = null;
       e.dataTransfer?.setData("text/plain", String(n));
       if (e.dataTransfer) e.dataTransfer.effectAllowed = "move";
       this.markZones();
@@ -364,10 +374,24 @@ export class Workbench {
       // render() detaches this very chip, so the outside-click document
       // handler would see a stale target and deselect instantly.
       e.stopPropagation();
+      if (this.bindFocused(n)) return; // a focused slot claims the click first
       this.model.sel = this.model.sel === n ? null : n;
+      this.model.slotSel = null;
       this.render();
     });
     return c;
+  }
+
+  // The focused bus slot gets first claim on a chip click — that is the whole
+  // point of lighting the pool. Returns false when the focus has gone stale (the
+  // bus vanished, or this pin is no longer eligible), so the click still selects.
+  private bindFocused(pin: number): boolean {
+    const s = this.model.slotSel;
+    if (!s) return false;
+    const role = s.kind === "i2c" ? R_I2C : s.kind === "uart" ? R_UART : R_SPI;
+    const def = this.defOf(role);
+    // On success the driver has already cleared the focus and re-rendered.
+    return !!def?.bindSlot?.(pin);
   }
 
   private markZones(): void {
@@ -377,6 +401,9 @@ export class Workbench {
       if (this.busRoles.has(role)) continue; // bus lanes highlight their own slots
       if (this.model.sel !== null) z.classList.add(this.canDrop(role) ? "compat" : "dim");
     }
+    // Which lane owns the focused slot decides the colour the pool glows in.
+    const kind = this.model.slotSel ? "k-" + this.model.slotSel.kind : "";
+    for (const k of ["k-i2c", "k-uart", "k-spi"]) this.poolEl.classList.toggle(k, k === kind);
   }
 
   private hintFail(msg: string): void {
@@ -394,6 +421,11 @@ export class Workbench {
     this.levelEls = new Array(SLOTS).fill(null);
     this.adcEls = new Array(SLOTS).fill(null);
     for (let n = 0; n < SLOTS; n++) {
+      // Show the GPIOs this board can name, not every GPIO the chip has: a board
+      // table like raspberry_pi_pico2_w leaves holes (GP23/24/25 are CYW43 pins
+      // there) and stops short of GP47, and a chip the firmware cannot address
+      // would be a chip that always refuses.
+      if (n !== TEMP && !this.model.isAddressable(n)) continue;
       const role = this.model.roles[n];
       if (this.busRoles.has(role)) continue; // shown inside its bus card slot
       const def = this.defOf(role);
@@ -403,9 +435,14 @@ export class Workbench {
       if (def.renderLane) def.renderLane(this.api, this.zoneEls.get(def.role)!);
     this.markZones();
     if (Date.now() < this.hintLock) return;
+    const s = this.model.slotSel;
     this.hintEl.textContent =
-      this.model.sel !== null ? tf("hint_sel", pinLabel(this.model.sel)) : t("wb_help");
-    this.hintEl.className = "wb-hint" + (this.model.sel !== null ? " act" : "");
+      this.model.sel !== null
+        ? tf("hint_sel", pinLabel(this.model.sel))
+        : s !== null
+          ? tf("hint_slot", s.role === "cs" ? "CS" + s.index : s.role.toUpperCase())
+          : t("wb_help");
+    this.hintEl.className = "wb-hint" + (this.model.sel !== null || s !== null ? " act" : "");
   }
 
   // Level changes only toggle classes on the elements defs registered via

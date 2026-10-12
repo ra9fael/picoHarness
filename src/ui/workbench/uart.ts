@@ -6,7 +6,7 @@
 // firmware-probed caps.uart table; a lone pin is always fine. Commands:
 // uart.cfg / uart.write / uart.read / uart.release.
 import { tf, type MsgKey } from "../i18n";
-import { NUM, TEMP, R_UART, pinLabel, type UartBus, type PinModel } from "../model/pins";
+import { R_UART, pinLabel, type UartBus, type PinModel } from "../model/pins";
 import { el } from "./dom";
 import { ICON } from "./icons";
 import type { FuncApi, FunctionDef } from "./types";
@@ -122,12 +122,13 @@ export class UartDriver {
   // —— pin binding ——
   bind(busId: number, which: "tx" | "rx", pin: number): void {
     const api = this.api;
-    if (!api || pin === TEMP || pin < 0 || pin >= NUM) return;
+    if (!api || !this.model.isAddressable(pin)) return;
     const model = this.model;
     const cur = model.roles[pin];
     if (cur !== 0 && cur !== R_UART) api.releasePin(pin);
     model.setUartSlot(busId, which, pin);
     model.sel = null;
+    model.slotSel = null;
     model.changed();
     this.scheduleCfg(busId);
     api.rerender();
@@ -314,6 +315,16 @@ export class UartDriver {
     return card;
   }
 
+  // Click-a-chip-into-the-focused-slot path; the engine calls it through the def.
+  bindFocused(pin: number): boolean {
+    const s = this.model.slotSel;
+    if (!s || s.kind !== "uart") return false;
+    const which = s.role as "tx" | "rx";
+    if (!this.slotAccept(s.bus, which, pin)) return false;
+    this.bind(s.bus, which, pin);
+    return true;
+  }
+
   // A labeled, droppable pin slot (TX or RX).
   private slot(api: FuncApi, busId: number, which: "tx" | "rx"): HTMLElement {
     const box = el("uart-slot", "div");
@@ -338,7 +349,7 @@ export class UartDriver {
       const n = Number(e.dataTransfer?.getData("text/plain"));
       if (this.slotAccept(busId, which, n)) this.bind(busId, which, n);
     });
-    val.addEventListener("click", (e) => {
+    box.addEventListener("click", (e) => {
       e.stopPropagation();
       const b = api.model.busUartById(busId);
       const cur = b ? (which === "tx" ? b.tx : b.rx) : -1;
@@ -347,7 +358,17 @@ export class UartDriver {
         return;
       }
       const sel = api.model.sel;
-      if (sel === null) return;
+      if (sel === null) {
+        // Nothing picked: focus this slot so the pool lights the pins that may
+        // legally come into it — the reverse of the chip→slot glow.
+        api.model.focusSlot(
+          api.model.slotFocused("uart", busId, which)
+            ? null
+            : { kind: "uart", bus: busId, role: which, index: 0 }
+        );
+        api.rerender();
+        return;
+      }
       if (this.slotAccept(busId, which, sel)) this.bind(busId, which, sel);
       else {
         const why = this.rejectReason(busId, which, sel);
@@ -361,7 +382,7 @@ export class UartDriver {
   // silent. Returns an i18n key, or null when the pin is actually fine.
   private rejectReason(busId: number, which: "tx" | "rx", n: number): MsgKey | null {
     const b = this.model.busUartById(busId);
-    if (!b || n < 0 || n >= NUM || n === TEMP) return null;
+    if (!b || !this.model.isAddressable(n)) return null;
     if (!this.model.uartRoleCap(n, which)) return which === "tx" ? "uart_need_tx" : "uart_need_rx";
     const other = which === "tx" ? b.rx : b.tx;
     if (other >= 0 && !this.model.uartPairOk(which === "tx" ? n : other, which === "tx" ? other : n))
@@ -374,7 +395,7 @@ export class UartDriver {
   // legal full-duplex pair with it. An empty other slot means a single-pin bus,
   // which is always allowed.
   private slotAccept(busId: number, which: "tx" | "rx", n: number): boolean {
-    if (!Number.isInteger(n) || n < 0 || n >= NUM || n === TEMP) return false;
+    if (!this.model.isAddressable(n)) return false; // not a GP this board can name
     const b = this.model.busUartById(busId);
     if (!b) return false;
     return this.model.uartSlotOk(b, which, n);
@@ -398,6 +419,7 @@ export class UartDriver {
         const sel = api.model.sel;
         const compat = sel !== null && pin < 0 && this.slotAccept(b.id, which, sel);
         elm.classList.toggle("compat", compat);
+        elm.classList.toggle("focus", pin < 0 && api.model.slotFocused("uart", b.id, which));
       };
       setSlot(card.tx, b.tx, "tx");
       setSlot(card.rx, b.rx, "rx");
@@ -440,12 +462,13 @@ export function makeUartDef(drv: UartDriver): FunctionDef {
     labelKey: "lane_uart",
     cls: "l-uart",
     icon: ICON[R_UART],
-    accept: (api, n) => n >= 0 && n < NUM && n !== TEMP,
+    accept: (api, n) => api.model.isAddressable(n),
     // pins enter a bus through the card slots, not a generic lane drop
     assign: () => {},
     release: () => {},
     activate: () => drv.resync(),
     chip: () => ({ els: [] }),
     renderLane: (api, zone) => drv.renderLane(api, zone),
+    bindSlot: (pin) => drv.bindFocused(pin),
   };
 }

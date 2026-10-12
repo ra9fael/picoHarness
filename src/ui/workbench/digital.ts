@@ -2,7 +2,7 @@
 // toggle). One shared driver debounces gpio.cfg pushes so rapid assignments
 // collapse into a single command.
 import { t, tf } from "../i18n";
-import { R_IN, R_OUT } from "../model/pins";
+import { R_IN, R_OUT, isBit } from "../model/pins";
 import { el } from "./dom";
 import { ICON } from "./icons";
 import type { FuncApi, FunctionDef } from "./types";
@@ -61,10 +61,13 @@ export class DigitalDriver {
   async flipOut(n: number): Promise<void> {
     const { model, link, note } = this.api;
     if (link.state !== "ready") return;
-    const val = ((model.devOut >> n) & 1) ^ 1;
+    const val = isBit(model.devOut, n) ? 0 : 1;
     model.setOutBit(n, val); // optimistic: instant feedback
     try {
-      const r = await link.sendCmd("gpio.out", { mask: 1 << n, vals: val << n });
+      // 2**n rather than 1<<n: GP32..GP47 masks are past JavaScript's 32-bit shift,
+      // which would wrap to a different pin entirely.
+      const bit = 2 ** n;
+      const r = await link.sendCmd("gpio.out", { mask: bit, vals: val * bit });
       if (r.ok) model.applyState(r.data, true);
       else {
         model.setOutBit(n, val ^ 1);

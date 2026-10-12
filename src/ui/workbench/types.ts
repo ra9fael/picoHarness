@@ -41,4 +41,9 @@ export interface FunctionDef {
   // engine does not place per-pin chips here and does not accept generic drops
   // — the def renders bus cards with their own labeled pin slots instead.
   renderLane?(api: FuncApi, zoneEl: HTMLElement): void;
+  // Pointer-only path for those card slots: the user clicked an empty slot (it is
+  // now PinModel.slotSel and the pool lit the pins it may take), then clicked a
+  // chip. Returns false when this lane no longer owns a focusable slot, so the
+  // engine falls back to the ordinary pin pick.
+  bindSlot?(pin: number): boolean;
 }

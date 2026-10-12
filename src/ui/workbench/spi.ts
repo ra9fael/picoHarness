@@ -6,7 +6,7 @@
 // asserted by the bus itself. Legality comes from the caps.spi table the firmware
 // measured on the board. Commands: spi.cfg / spi.xfer / spi.release.
 import { tf, type MsgKey } from "../i18n";
-import { NUM, TEMP, R_SPI, pinLabel, type SpiBus, type SpiDataRole, type SpiRole, type PinModel } from "../model/pins";
+import { R_SPI, pinLabel, type SpiBus, type SpiDataRole, type SpiRole, type PinModel } from "../model/pins";
 import { el } from "./dom";
 import { ICON } from "./icons";
 import type { FuncApi, FunctionDef } from "./types";
@@ -137,13 +137,14 @@ export class SpiDriver {
   // —— pin binding ——
   bind(busId: number, which: SpiRole, pin: number, index = 0): void {
     const api = this.api;
-    if (!api || pin === TEMP || pin < 0 || pin >= NUM) return;
+    if (!api || !this.model.isAddressable(pin)) return;
     const model = this.model;
     const cur = model.roles[pin];
     if (cur !== 0 && cur !== R_SPI) api.releasePin(pin);
     if (which === "cs") model.setSpiCs(busId, index, pin);
     else model.setSpiSlot(busId, which, pin);
     model.sel = null;
+    model.slotSel = null;
     model.changed();
     this.scheduleCfg(busId);
     api.rerender();
@@ -237,6 +238,16 @@ export class SpiDriver {
     return o;
   }
 
+  // Click-a-chip-into-the-focused-slot path; the engine calls it through the def.
+  bindFocused(pin: number): boolean {
+    const s = this.model.slotSel;
+    if (!s || s.kind !== "spi") return false;
+    const which = s.role as SpiRole;
+    if (!this.slotAccept(s.bus, which, s.index, pin)) return false;
+    this.bind(s.bus, which, pin, s.index);
+    return true;
+  }
+
   // A labeled, droppable pin slot (SCK / MOSI / MISO / CSn).
   private slot(busId: number, which: SpiRole, index: number): HTMLElement {
     const box = el("spi-slot", "div");
@@ -259,7 +270,7 @@ export class SpiDriver {
       const n = Number(e.dataTransfer?.getData("text/plain"));
       if (this.slotAccept(busId, which, index, n)) this.bind(busId, which, n, index);
     });
-    val.addEventListener("click", (e) => {
+    box.addEventListener("click", (e) => {
       e.stopPropagation();
       const b = this.api?.model.busSpiById(busId);
       if (!b) return;
@@ -269,7 +280,17 @@ export class SpiDriver {
         return;
       }
       const sel = this.api!.model.sel;
-      if (sel === null) return;
+      if (sel === null) {
+        // Nothing picked: focus this slot so the pool lights the pins that may
+        // legally come into it — the reverse of the chip→slot glow.
+        this.api!.model.focusSlot(
+          this.api!.model.slotFocused("spi", busId, which, index)
+            ? null
+            : { kind: "spi", bus: busId, role: which, index }
+        );
+        this.api!.rerender();
+        return;
+      }
       if (this.slotAccept(busId, which, index, sel)) this.bind(busId, which, sel, index);
       else {
         const why = this.rejectReason(busId, which, index, sel);
@@ -283,7 +304,7 @@ export class SpiDriver {
   // silent. Returns an i18n key plus its argument, or key null when fine.
   private rejectReason(busId: number, which: SpiRole, index: number, n: number): { key: MsgKey | null; arg: string } {
     const b = this.model.busSpiById(busId);
-    if (!b || n < 0 || n >= NUM || n === TEMP) return { key: null, arg: "" };
+    if (!b || !this.model.isAddressable(n)) return { key: null, arg: "" };
     if (!this.model.spiRoleCap(n, which))
       return { key: "spi_cannot", arg: which === "cs" ? "CS" : which.toUpperCase() };
     const cand: SpiBus = { ...b, cs: b.cs.slice() };
@@ -301,7 +322,7 @@ export class SpiDriver {
   }
 
   private slotAccept(busId: number, which: SpiRole, index: number, n: number): boolean {
-    if (!Number.isInteger(n) || n < 0 || n >= NUM || n === TEMP) return false;
+    if (!this.model.isAddressable(n)) return false; // not a GP this board can name
     const b = this.model.busSpiById(busId);
     if (!b) return false;
     if (which === "cs") {
@@ -467,6 +488,7 @@ export class SpiDriver {
         elm.classList.toggle("filled", pin >= 0);
         const sel = api.model.sel;
         elm.classList.toggle("compat", sel !== null && pin < 0 && this.slotAccept(b.id, role, 0, sel));
+        elm.classList.toggle("focus", pin < 0 && api.model.slotFocused("spi", b.id, role, 0));
       }
       for (let i = 0; i < this.model.spiCsLimit; i++) {
         const elm = card.slots.get("cs" + i)!;
@@ -479,6 +501,7 @@ export class SpiDriver {
           "compat",
           sel !== null && pin < 0 && this.slotAccept(b.id, "cs", i, sel)
         );
+        elm.classList.toggle("focus", pin < 0 && api.model.slotFocused("spi", b.id, "cs", i));
       }
 
       const complete = this.model.spiComplete(b);
@@ -542,12 +565,13 @@ export function makeSpiDef(drv: SpiDriver): FunctionDef {
     labelKey: "lane_spi",
     cls: "l-spi",
     icon: ICON[R_SPI],
-    accept: (api, n) => n >= 0 && n < NUM && n !== TEMP,
+    accept: (api, n) => api.model.isAddressable(n),
     // pins enter a bus through the card slots, not a generic lane drop
     assign: () => {},
     release: () => {},
     activate: () => drv.resync(),
     chip: () => ({ els: [] }),
     renderLane: (api, zone) => drv.renderLane(api, zone),
+    bindSlot: (pin) => drv.bindFocused(pin),
   };
 }

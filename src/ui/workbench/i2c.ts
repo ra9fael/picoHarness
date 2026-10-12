@@ -5,7 +5,7 @@
 // its arbiter and returns the authoritative state. rp2 PIO accepts almost any
 // GP pair, so legality is decided by construction, not a boot caps table.
 import { tf, type MsgKey } from "../i18n";
-import { NUM, TEMP, R_I2C, pinLabel, type I2cBus, type PinModel } from "../model/pins";
+import { R_I2C, pinLabel, type I2cBus, type PinModel } from "../model/pins";
 import { el } from "./dom";
 import { ICON } from "./icons";
 import type { FuncApi, FunctionDef } from "./types";
@@ -127,13 +127,14 @@ export class I2cDriver {
   // —— pin binding ——
   bind(busId: number, which: "sda" | "scl", pin: number): void {
     const api = this.api;
-    if (!api || pin === TEMP || pin < 0 || pin >= NUM) return;
+    if (!api || !this.model.isAddressable(pin)) return;
     const model = this.model;
     // free the pin from whatever non-bus function currently holds it
     const cur = model.roles[pin];
     if (cur !== 0 && cur !== R_I2C) api.releasePin(pin);
     model.setBusSlot(busId, which, pin);
     model.sel = null; // clear the pick so the slot affordance resets
+    model.slotSel = null;
     model.changed();
     this.scheduleCfg(busId);
     api.rerender();
@@ -354,6 +355,16 @@ export class I2cDriver {
     return card;
   }
 
+  // Click-a-chip-into-the-focused-slot path; the engine calls it through the def.
+  bindFocused(pin: number): boolean {
+    const s = this.model.slotSel;
+    if (!s || s.kind !== "i2c") return false;
+    const which = s.role as "sda" | "scl";
+    if (!this.slotAccept(s.bus, which, pin)) return false;
+    this.bind(s.bus, which, pin);
+    return true;
+  }
+
   // A labeled, droppable pin slot (SDA or SCL).
   private slot(api: FuncApi, busId: number, which: "sda" | "scl"): HTMLElement {
     const box = el("i2c-slot", "div");
@@ -378,7 +389,7 @@ export class I2cDriver {
       const n = Number(e.dataTransfer?.getData("text/plain"));
       if (this.slotAccept(busId, which, n)) this.bind(busId, which, n);
     });
-    val.addEventListener("click", (e) => {
+    box.addEventListener("click", (e) => {
       e.stopPropagation();
       const b = api.model.busById(busId);
       const cur = b ? (which === "sda" ? b.sda : b.scl) : -1;
@@ -389,7 +400,17 @@ export class I2cDriver {
       // empty slot + a selected eligible pin → bind it (mirrors the click-to-
       // assign flow the per-pin lanes use for keyboard/pointer users)
       const sel = api.model.sel;
-      if (sel === null) return;
+      if (sel === null) {
+        // Nothing picked: focus this slot instead, which lights the pool chips
+        // this slot may legally take — the reverse of the chip→slot glow.
+        api.model.focusSlot(
+          api.model.slotFocused("i2c", busId, which)
+            ? null
+            : { kind: "i2c", bus: busId, role: which, index: 0 }
+        );
+        api.rerender();
+        return;
+      }
       if (this.slotAccept(busId, which, sel)) this.bind(busId, which, sel);
       else {
         const why = this.rejectReason(busId, which, sel);
@@ -403,7 +424,7 @@ export class I2cDriver {
   // silent. Returns an i18n key, or null when the pin is actually fine.
   private rejectReason(busId: number, which: "sda" | "scl", n: number): MsgKey | null {
     const b = this.model.busById(busId);
-    if (!b || n < 0 || n >= NUM || n === TEMP) return null;
+    if (!b || !this.model.isAddressable(n)) return null;
     if (!this.model.i2cRoleCap(n, which)) return which === "scl" ? "i2c_need_scl" : "i2c_need_sda";
     const other = which === "scl" ? b.sda : b.scl;
     if (other >= 0 && !this.model.i2cPairOk(which === "scl" ? n : other, which === "scl" ? other : n))
@@ -415,7 +436,7 @@ export class I2cDriver {
   // per the firmware pair table), not the pin already in the bus's other slot,
   // and forms a legal ordered pair once that other slot is filled.
   private slotAccept(busId: number, which: "sda" | "scl", n: number): boolean {
-    if (!Number.isInteger(n) || n < 0 || n >= NUM || n === TEMP) return false;
+    if (!this.model.isAddressable(n)) return false; // not a GP this board can name
     const b = this.model.busById(busId);
     if (!b) return false;
     return this.model.i2cSlotOk(b, which, n);
@@ -442,6 +463,7 @@ export class I2cDriver {
         const sel = api.model.sel;
         const compat = sel !== null && pin < 0 && this.slotAccept(b.id, which, sel);
         elm.classList.toggle("compat", compat);
+        elm.classList.toggle("focus", pin < 0 && api.model.slotFocused("i2c", b.id, which));
       };
       setSlot(card.sda, b.sda, "sda");
       setSlot(card.scl, b.scl, "scl");
@@ -488,12 +510,13 @@ export function makeI2cDef(drv: I2cDriver): FunctionDef {
     labelKey: "lane_i2c",
     cls: "l-i2c",
     icon: ICON[R_I2C],
-    accept: (api, n) => n >= 0 && n < NUM && n !== TEMP,
+    accept: (api, n) => api.model.isAddressable(n),
     // pins enter a bus through the card slots, not a generic lane drop
     assign: () => {},
     release: () => {},
     activate: () => drv.resync(),
     chip: () => ({ els: [] }),
     renderLane: (api, zone) => drv.renderLane(api, zone),
+    bindSlot: (pin) => drv.bindFocused(pin),
   };
 }
