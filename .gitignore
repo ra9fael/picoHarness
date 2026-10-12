@@ -3,3 +3,5 @@ dist/
 .venv/
 __pycache__/
 *.pyc
+spi_probe.log
+spi_probe_*.json
