@@ -119,11 +119,14 @@ After changing the UI, do these in order:
 [Troubleshooting criteria]
 
 The UI sends a new command and the device answers "unknown cmd", or the gpio.state reply is
-missing a new field, or ready.caps has no uart/i2c_pairs — that is not a frontend bug, it means
+missing a new field, or ready.caps has no uart/i2c_pairs/spi — that is not a frontend bug, it means
 G:\code.py is still the old version. Compare the VERSION string in the device-side code.py with
 the source and copy the file once more.
 Only one COM port appears, or ready.caps.usb.data is false — G:\boot.py was not copied, or the
 board was not hard-reset afterwards (Ctrl-D does not count).
+ready.caps.spi disagreeing with what a sweep would find — that is the static SPI_GROUPS table, and
+it does not change by itself. Re-measure with tools/spi_probe.py rather than adding a boot-time
+probe; there is deliberately no SPI sweep.
 
 [Firmware implementation notes]
 
@@ -154,6 +157,15 @@ Also: writing .frequency on an rp2 fixed-frequency PWMOut raises Invalid variabl
 firmware deinits and rebuilds the object when the frequency changes. The mpy asyncio port is a
 queue-rotating scheduler and create_task concurrency on it is sound (the earlier diagnosis that
 "gather awaits children in order and starves them" was disproved on hardware).
+
+The SPI constraints below came out of tools/spi_probe.py on the board as well, so do not re-derive
+them from the datasheet: the constructor takes the pins positionally (baudrate= raises TypeError,
+half_duplex= raises NotImplementedError), a bare SCK is refused with "Must provide MISO or MOSI pin",
+so speed and mode are applied afterwards with configure() while the bus is locked (without the lock
+it answers "Function requires lock"). .frequency reports the clock the divider actually reached —
+150 MHz over an even integer, 75 MHz ceiling — which is why hbaud has to travel back to the host.
+The routable (SCK, MOSI, MISO) sets live in the static SPI_GROUPS table and are not swept at boot:
+the exhaustive version is 1600+ constructor calls.
 
 The UI layering and its dependency direction are in the "Architecture" section of the repository
 README; not repeated here. One hard rule: dependencies point one way, downward. Each function under

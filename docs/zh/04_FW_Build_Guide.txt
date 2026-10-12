@@ -105,10 +105,12 @@ npm run build 走的是 esbuild，它只做打包，不做类型检查。改过 
 [排障判据]
 
 界面发了新命令、设备回 "unknown cmd"，或者 gpio.state 应答里缺新字段、
-ready.caps 里没有 uart/i2c_pairs —— 这不是前端 bug，是 G:\code.py 还是旧版本。
+ready.caps 里没有 uart/i2c_pairs/spi —— 这不是前端 bug，是 G:\code.py 还是旧版本。
 先比对设备端 code.py 里的 VERSION 字符串与源码，重新拷一次即可。
 只看到一个 COM 口、或 ready.caps.usb.data 为 false —— 是 G:\boot.py 没拷进去，
 或者拷完没做硬复位（Ctrl-D 不算）。
+ready.caps.spi 里的引脚组和别处实测不一致 —— 那是 SPI_GROUPS 这张静态表的问题，
+它不会自己变，重扫请跑 tools/spi_probe.py，别去改探测逻辑（开机不扫 SPI）。
 
 [固件实现要点]
 
@@ -131,6 +133,13 @@ adc_streamer 波形批量流。每个协程先 create_task 拿到 Task 句柄，
 另外：rp2 固定频率模式的 PWMOut 写 .frequency 会抛 Invalid variable_frequency，
 固件改成频率变化时 deinit 重建。mpy 的 asyncio 端口本身是队列轮转调度器，
 create_task 并发没有缺陷（早前"gather 按顺序 await 饿死子任务"的诊断已被真机证伪）。
+
+SPI 这几条同样是 tools/spi_probe.py 实测出来的，别再照数据手册推：
+构造函数只收位置参数（`baudrate=` 直接 TypeError，`half_duplex=` NotImplementedError），
+只给 SCK 会被拒（Must provide MISO or MOSI pin），所以速率和模式要建好之后在锁内
+`configure()`（不锁就报 Function requires lock）；`.frequency` 回的是分频器实际到达的值，
+150 MHz 除以偶数、上限 75 MHz，所以 `hbaud` 必须回给主机；
+可路由的 (SCK, MOSI, MISO) 组合是静态表 SPI_GROUPS，开机不扫描（穷举要 1600+ 次构造）。
 
 界面侧的分层与依赖方向见仓库 README 的"架构"一节，这里不重复。
 一条硬约束：层间依赖单向向下，workbench/ 下每个功能是一个 FunctionDef 插件，
