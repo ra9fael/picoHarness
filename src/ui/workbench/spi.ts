@@ -11,9 +11,12 @@ import { el } from "./dom";
 import { ICON } from "./icons";
 import type { FuncApi, FunctionDef } from "./types";
 
-// Every entry divides 150 MHz by an even integer, and the port cannot clock
-// faster than 75 MHz, so these are all reachable settings.
-const CLOCKS = [9600, 115200, 250000, 500000, 1000000, 2000000, 5000000, 10000000, 25000000, 50000000];
+// The port divides the 150 MHz system clock by an EVEN integer (measured with
+// tools/spi_probe.py), so only some of these presets are hit exactly — 9600 gives
+// 9599 Hz, 2 MHz gives 1973684, 10 MHz gives 9375000. The card prints the clock
+// that actually came out (spi.xfer's hbaud), the same honesty the PWM lane uses.
+// 50 MHz is deliberately absent: it lands on 37.5 MHz, and 37.5 is listed instead.
+const CLOCKS = [9600, 115200, 250000, 500000, 1000000, 2000000, 5000000, 10000000, 25000000, 37500000];
 
 const ROLES: SpiDataRole[] = ["sck", "mosi", "miso"];
 
