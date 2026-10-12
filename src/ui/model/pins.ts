@@ -353,6 +353,12 @@ export class PinModel extends Emitter {
     return this.i2cPairs !== null;
   }
 
+  // Whether the firmware handed us the SPI pin groups. Without them a badge would
+  // be a guess, so the chip shows nothing rather than claiming a role.
+  get spiKnown(): boolean {
+    return this.spiGroups !== null;
+  }
+
   pwmCap(n: number): boolean {
     if (n === TEMP) return false; // the temperature sensor is not a PWM pin
     return !this.pwmCaps || this.pwmCaps.includes(n);

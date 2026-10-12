@@ -322,25 +322,41 @@ export class Workbench {
   private mkChip(n: number, def: FunctionDef | null): HTMLElement {
     const c = el("chip", "span");
     c.draggable = this._active;
-    let i2cBadge = "";
+    // Each badge letter stands for one caps table the firmware actually reported;
+    // a table it never sent shows no badge at all. The rows of the rp2 function
+    // table are disjoint per pin, so SPI is one of CK/DO/DI, never two.
+    const badges: [string, MsgKey][] = [];
+    if (this.model.capsKnown) {
+      if (this.model.pwmCap(n)) badges.push(["P", "cap_p"]);
+      if (this.model.adcCap(n)) badges.push(["A", "cap_a"]);
+    }
     if (this.model.i2cPairKnown) {
       // rp2 I2C roles are exclusive (SCL = odd, SDA = even), so a pin is one or
       // the other — the badge literally tells you which line it belongs on.
-      i2cBadge = this.model.i2cRoleCap(n, "scl") ? "S" : this.model.i2cRoleCap(n, "sda") ? "D" : "";
+      if (this.model.i2cRoleCap(n, "scl")) badges.push(["S", "cap_s"]);
+      else if (this.model.i2cRoleCap(n, "sda")) badges.push(["D", "cap_d"]);
     }
-    let uartBadge = "";
     if (this.model.uartKnown) {
       // A UART pin may be TX-capable, RX-capable, or both, so concatenate.
-      const t = this.model.uartRoleCap(n, "tx");
-      const r = this.model.uartRoleCap(n, "rx");
-      uartBadge = (t ? "T" : "") + (r ? "R" : "");
+      if (this.model.uartRoleCap(n, "tx")) badges.push(["T", "cap_t"]);
+      if (this.model.uartRoleCap(n, "rx")) badges.push(["R", "cap_r"]);
     }
-    const caps =
-      (this.model.capsKnown && this.model.pwmCap(n) ? "P" : "") +
-      (this.model.capsKnown && this.model.adcCap(n) ? "A" : "") +
-      i2cBadge +
-      uartBadge;
-    c.innerHTML = `<b>${pinLabel(n)}</b>${caps ? `<span class="caps">${caps}</span>` : ""}`;
+    if (this.model.spiKnown) {
+      if (this.model.spiRoleCap(n, "sck")) badges.push(["CK", "cap_ck"]);
+      else if (this.model.spiRoleCap(n, "mosi")) badges.push(["DO", "cap_do"]);
+      else if (this.model.spiRoleCap(n, "miso")) badges.push(["DI", "cap_di"]);
+    }
+    c.innerHTML = `<b>${pinLabel(n)}</b>`;
+    if (badges.length) {
+      const wrap = el("caps", "span");
+      for (const [txt, key] of badges) {
+        const s = document.createElement("span");
+        s.textContent = txt;
+        s.title = t(key);
+        wrap.appendChild(s);
+      }
+      c.appendChild(wrap);
+    }
     this.levelEls[n] = null;
     this.adcEls[n] = null;
     if (def) {

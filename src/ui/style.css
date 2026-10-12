@@ -134,6 +134,7 @@ main { padding: 16px; }
 .wb-pool.k-spi .chip.compat { border-color: var(--c-spi); background: #1f1620; }
 .wb-pool.k-spi .chip.compat b { color: var(--c-spi); }
 .chip .caps { font-size: 9px; color: var(--dim); letter-spacing: 1px; }
+.chip .caps span { cursor: help; }
 .chip .mini {
   background: none;
   border: 1px solid var(--border);
