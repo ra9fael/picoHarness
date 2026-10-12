@@ -5,7 +5,17 @@
 import { Emitter } from "../core/events";
 import type { JsonMsg } from "../types";
 
-export const NUM = 29; // GP0..GP28, matching firmware NUM_PINS
+// The model is sized for the widest chip this harness family runs on, not for one
+// board: pico-sdk src/rp2350/hardware_regs/include/hardware/platform_defs.h gives
+// NUM_BANK0_GPIOS = 30 for the RP2350A (GP0..GP29) and 48 for the RP2350B
+// (GP0..GP47). Which of those the connected board can actually reach is a per-board
+// fact that arrives in caps.gp (PinModel.addressable) — CircuitPython only hands out
+// a pin its board table declares, and a Pin object carries no number, so code.py
+// parses it out of the declared name; a pin that only has ADC aliases (board.A3 on
+// the Pico 2 = GP29) is numbered ADC_BASE + channel. Those tables have holes: the
+// official raspberry_pi_pico2_w declares no GP0-based names for GP23/GP24/GP25, which
+// on that board are the CYW43 SMPS_MODE/LED/VBUS_SENSE pins.
+export const NUM = 48; // GP0..GP47
 export const R_IN = 1, R_OUT = 2, R_PWM = 3, R_ADC = 4, R_I2C = 5, R_UART = 6, R_SPI = 7;
 
 // An I2C bus is a multi-pin function: it owns a named PAIR of pins (sda/scl
@@ -41,17 +51,42 @@ export type SpiRole = "sck" | "mosi" | "miso" | "cs";
 export type SpiDataRole = "sck" | "mosi" | "miso";
 type SpiGroupSet = { sck: Set<number>; mosi: Set<number>; miso: Set<number> };
 
+// Which bus card slot the user has focused. Selecting a slot asks the opposite
+// question of selecting a chip: instead of "where may this pin go", the pool
+// answers "which pins may come into this slot".
+export type SlotKind = "i2c" | "uart" | "spi";
+export type SlotSel = { kind: SlotKind; bus: number; role: string; index: number };
+
 // The on-die temperature sensor is a virtual ADC channel: it occupies one extra
 // model slot (index TEMP) but travels on the wire as pin TEMP_PIN, matching the
 // firmware. All roles/pulls/adcFmt/adcSmooth arrays are SLOTS long so the temp
-// channel flows through the same lane/chip/scope code as a GP pin.
-export const TEMP = 29; // internal slot index of the temperature channel
-export const SLOTS = 30; // NUM GP pins + the temp slot
+// channel flows through the same lane/chip/scope code as a GP pin. TEMP sits one
+// past the widest possible GPIO so it can never collide with a real GP number --
+// the firmware has always been safe here (it names the channel 100), but a UI that
+// hardcoded TEMP=29 would start overlapping GP29 the moment a 30-GPIO board showed
+// up, which is exactly the bug this line used to carry.
+export const TEMP = NUM; // internal slot index of the temperature channel
+export const SLOTS = NUM + 1; // every GP slot + the temp slot
 export const TEMP_PIN = 100; // wire id of the temperature channel
 
 export const toWire = (n: number): number => (n === TEMP ? TEMP_PIN : n);
 export const fromWire = (p: number): number => (p === TEMP_PIN ? TEMP : p);
 export const pinLabel = (n: number): string => (n === TEMP ? "TEMP" : "GP" + n);
+
+// Pin bitmasks travel as JSON integers and are up to NUM bits wide, which is past
+// the 32-bit boundary JavaScript's shift operators work on: `1 << 33` silently
+// wraps. So every mask here is built and read with plain arithmetic instead --
+// exact, because a 48-bit mask is still below Number.MAX_SAFE_INTEGER (2^53).
+export const isBit = (mask: number, n: number): boolean => Math.floor(mask / 2 ** n) % 2 === 1;
+// idempotent: setting a bit that is already set (or clearing one already clear)
+// returns the mask unchanged, so callers never have to check first.
+export const setBit = (mask: number, n: number, on: boolean): number =>
+  isBit(mask, n) === on ? mask : on ? mask + 2 ** n : mask - 2 ** n;
+
+// A mask arriving off the wire is a JSON integer up to NUM bits wide, so it is
+// adopted with a plain number check -- `>>> 0`, the idiom this replaced, truncates
+// to 32 bits and would silently drop GP32..GP47.
+const wireMask = (v: unknown): number => (typeof v === "number" && Number.isFinite(v) ? v : 0);
 
 // EMA factor for the ADC chip readout: smooths the bursty deadband events into
 // a steady number. 0.3 tracks a real change within a few samples while killing
@@ -76,6 +111,7 @@ export class PinModel extends Emitter {
   devOut = 0;
   devPwm = 0;
   sel: number | null = null;
+  slotSel: SlotSel | null = null; // the bus-card slot the user clicked; see slotSelAccepts
   buses: I2cBus[] = []; // I2C bus instances (multi-pin functions)
   pinBus = new Int16Array(SLOTS).fill(-1); // slot -> owning bus id, -1 = not in a bus
   private busSeq = 0; // monotonic source of bus ids
@@ -113,6 +149,18 @@ export class PinModel extends Emitter {
   private spiMaxCs = 4;
   private spiMaxBuses = 2;
   private spiCeiling = 0; // 0 = unknown
+  // The GPIOs the connected board can actually name (caps.gp), which is narrower
+  // than NUM and may have holes. null = a firmware that predates caps.gp, where
+  // caps.pins was the only shape we were told -- treat it as GP0..pins-1.
+  private gpSet: Set<number> | null = null;
+
+  // Whether pin n is real on this board. Unaddressable GPIOs are not offered in
+  // the pool and reject every role, because the firmware would answer "board has
+  // no GPn" at cfg time.
+  isAddressable(n: number): boolean {
+    if (!Number.isInteger(n) || n < 0 || n >= NUM) return false;
+    return this.gpSet ? this.gpSet.has(n) : true;
+  }
 
   // Drivers call this after any user-facing config mutation so the store
   // can coalesce saves; "levels" is only about live pin values.
@@ -121,6 +169,18 @@ export class PinModel extends Emitter {
   }
 
   setCaps(caps: any): void {
+    const gp = Array.isArray(caps?.gp)
+      ? caps.gp.map(Number).filter((n: number) => Number.isInteger(n) && n >= 0 && n < NUM)
+      : null;
+    const pins = Number(caps?.pins) > 0 ? Number(caps.pins) : 0;
+    // A board table with holes cannot be described by a count, so caps.gp wins
+    // when the firmware sends it; an older one that only says how many pins it
+    // swept still gets the contiguous set it swept.
+    this.gpSet = gp
+      ? new Set(gp)
+      : pins > 0
+        ? new Set(Array.from({ length: Math.min(pins, NUM) }, (_, i) => i))
+        : null;
     this.pwmCaps = Array.isArray(caps?.pwm) ? caps.pwm.map(Number) : null;
     this.adcCaps = Array.isArray(caps?.adc) ? caps.adc.map(Number) : null;
     const pairs = Array.isArray(caps?.i2c_pairs) ? caps.i2c_pairs : null;
@@ -307,7 +367,7 @@ export class PinModel extends Emitter {
   // Unknown caps → permissive (accept any GP); the device still rejects an
   // illegal pair authoritatively at cfg time.
   i2cRoleCap(n: number, role: "scl" | "sda"): boolean {
-    if (n === TEMP || n < 0 || n >= NUM) return false;
+    if (!this.isAddressable(n)) return false; // not on this board's pin table
     const set = role === "scl" ? this.i2cSclPins : this.i2cSdaPins;
     return !set || set.has(n);
   }
@@ -337,7 +397,7 @@ export class PinModel extends Emitter {
   // Whether pin n can serve as the TX (or RX) line of some UART. Unknown caps →
   // permissive; the device rejects an unroutable pin at cfg time.
   uartRoleCap(n: number, role: "tx" | "rx"): boolean {
-    if (n === TEMP || n < 0 || n >= NUM) return false;
+    if (!this.isAddressable(n)) return false; // not on this board's pin table
     const set = role === "tx" ? this.uartTxPins : this.uartRxPins;
     return !set || set.has(n);
   }
@@ -360,36 +420,37 @@ export class PinModel extends Emitter {
   }
 
   level(n: number): number {
-    return this.roles[n] === R_OUT ? (this.devOut >> n) & 1 : (this.devIn >> n) & 1;
+    return this.roles[n] === R_OUT
+      ? (isBit(this.devOut, n) ? 1 : 0)
+      : (isBit(this.devIn, n) ? 1 : 0);
   }
 
   setOutBit(n: number, v: number): void {
-    this.devOut = (this.devOut & ~(1 << n)) | ((v & 1) << n);
+    this.devOut = setBit(this.devOut, n, v === 1);
     this.emit("levels");
   }
 
   cfgMasks() {
     let inM = 0, outM = 0, pd = 0, pn = 0;
     for (let n = 0; n < NUM; n++) {
-      const bit = 1 << n;
       if (this.roles[n] === R_IN) {
-        inM |= bit;
-        if (this.pulls[n] === 1) pd |= bit;
-        else if (this.pulls[n] === 2) pn |= bit;
-      } else if (this.roles[n] === R_OUT) outM |= bit;
+        inM = setBit(inM, n, true);
+        if (this.pulls[n] === 1) pd = setBit(pd, n, true);
+        else if (this.pulls[n] === 2) pn = setBit(pn, n, true);
+      } else if (this.roles[n] === R_OUT) outM = setBit(outM, n, true);
     }
     return { in: inM, out: outM, pd, pn };
   }
 
   pwmMask(): number {
     let m = 0;
-    for (let n = 0; n < NUM; n++) if (this.roles[n] === R_PWM) m |= 1 << n;
+    for (let n = 0; n < NUM; n++) if (this.roles[n] === R_PWM) m = setBit(m, n, true);
     return m;
   }
 
   adcMask(): number {
     let m = 0;
-    for (let n = 0; n < NUM; n++) if (this.roles[n] === R_ADC) m |= 1 << n;
+    for (let n = 0; n < NUM; n++) if (this.roles[n] === R_ADC) m = setBit(m, n, true);
     return m;
   }
 
@@ -470,7 +531,8 @@ export class PinModel extends Emitter {
   // mirrors the firmware cfg_i2c mask for drift comparison.
   i2cMask(): number {
     let m = 0;
-    for (const b of this.buses) if (b.sda >= 0 && b.scl >= 0) m |= (1 << b.sda) | (1 << b.scl);
+    for (const b of this.buses)
+      if (b.sda >= 0 && b.scl >= 0) m = setBit(setBit(m, b.sda, true), b.scl, true);
     return m;
   }
 
@@ -554,8 +616,8 @@ export class PinModel extends Emitter {
   uartMask(): number {
     let m = 0;
     for (const b of this.uartBuses) {
-      if (b.tx >= 0) m |= 1 << b.tx;
-      if (b.rx >= 0) m |= 1 << b.rx;
+      if (b.tx >= 0) m = setBit(m, b.tx, true);
+      if (b.rx >= 0) m = setBit(m, b.rx, true);
     }
     return m;
   }
@@ -602,7 +664,7 @@ export class PinModel extends Emitter {
   // Whether pin n may ever carry this role. CS is the exception: the line is a
   // plain digital output on the firmware side, so any free GP can be one.
   spiRoleCap(n: number, role: SpiRole): boolean {
-    if (n === TEMP || n < 0 || n >= NUM) return false;
+    if (!this.isAddressable(n)) return false; // not on this board's pin table
     if (!this.spiGroups || role === "cs") return true;
     return this.spiGroups.some((g) => g[role].has(n));
   }
@@ -645,6 +707,43 @@ export class PinModel extends Emitter {
     const members = [cand.sck, cand.mosi, cand.miso, ...cand.cs];
     if (members.indexOf(n) !== members.lastIndexOf(n)) return false; // one pin, one role
     return this.spiSetOk(cand.sck, cand.mosi, cand.miso);
+  }
+
+  // —— focused slot (reverse highlight) ——
+  // Focus a bus-card slot, or pass null to drop it. A pin pick and a slot pick
+  // are exclusive: only one direction of the highlight may be lit at a time.
+  focusSlot(s: SlotSel | null): void {
+    this.slotSel = s;
+    if (s) this.sel = null;
+  }
+
+  slotFocused(kind: SlotKind, bus: number, role: string, index = 0): boolean {
+    const s = this.slotSel;
+    return !!s && s.kind === kind && s.bus === bus && s.role === role && s.index === index;
+  }
+
+  // Whether the focused slot could legally take pin n — the pool paints its
+  // chips from this. Answers null when the firmware has not reported the table
+  // the check needs: an unknown caps set must light nothing, because dimming 28
+  // chips on a guess would be worse than lighting them all.
+  slotSelAccepts(n: number): boolean | null {
+    const s = this.slotSel;
+    if (!s) return null;
+    if (s.kind === "i2c" && !this.i2cPairs) return null;
+    if (s.kind === "uart" && !this.uartKnown) return null;
+    // A CS line is a plain output, so its legality never depends on caps.spi.
+    if (s.kind === "spi" && s.role !== "cs" && !this.spiGroups) return null;
+    if (!this.isAddressable(n)) return false; // not on this board's pin table
+    if (s.kind === "i2c") {
+      const b = this.busById(s.bus);
+      return b ? this.i2cSlotOk(b, s.role as "scl" | "sda", n) : false;
+    }
+    if (s.kind === "uart") {
+      const b = this.busUartById(s.bus);
+      return b ? this.uartSlotOk(b, s.role as "tx" | "rx", n) : false;
+    }
+    const b = this.busSpiById(s.bus);
+    return b ? this.spiSlotOk(b, s.role as SpiRole, n) : false;
   }
 
   // Bind a data pin into a spi slot; mirrors setUartSlot but for sck/mosi/miso and
@@ -732,7 +831,7 @@ export class PinModel extends Emitter {
     let m = 0;
     for (const b of this.spiBuses) {
       if (!this.spiComplete(b)) continue;
-      for (const p of [b.sck, b.mosi, b.miso, ...b.cs]) if (p >= 0) m |= 1 << p;
+      for (const p of [b.sck, b.mosi, b.miso, ...b.cs]) if (p >= 0) m = setBit(m, p, true);
     }
     return m;
   }
@@ -753,7 +852,7 @@ export class PinModel extends Emitter {
       return;
     }
     if (m.evt !== "gpio_in" || typeof m.in !== "number") return;
-    this.devIn = m.in >>> 0;
+    this.devIn = wireMask(m.in);
     this.emit("levels");
   }
 
@@ -796,9 +895,9 @@ export class PinModel extends Emitter {
     uartDrift: boolean;
     spiDrift: boolean;
   } {
-    this.devIn = d.in >>> 0;
-    this.devOut = d.out >>> 0;
-    this.devPwm = (d.cfg_pwm ?? 0) >>> 0;
+    this.devIn = wireMask(d.in);
+    this.devOut = wireMask(d.out);
+    this.devPwm = wireMask(d.cfg_pwm);
     this.emit("levels");
     const none = {
       gpioDrift: false,
@@ -812,7 +911,7 @@ export class PinModel extends Emitter {
     const w = this.cfgMasks();
     const gpioDrift =
       d.cfg_in !== w.in || d.cfg_out !== w.out ||
-      (d.cfg_pd >>> 0) !== w.pd || (d.cfg_pn >>> 0) !== w.pn;
+      (wireMask(d.cfg_pd)) !== w.pd || (wireMask(d.cfg_pn)) !== w.pn;
     const pwmDrift = (d.cfg_pwm ?? 0) !== this.pwmMask();
     const adcDrift =
       (d.cfg_adc ?? 0) !== this.adcMask() || !!d.adc_temp !== this.adcTempOn();
