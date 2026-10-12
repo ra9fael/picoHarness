@@ -123,7 +123,7 @@ To disconnect, click the same button again (its label changes to "Disconnect").
 The workbench is the main view, split into a top half and a bottom half:
 
 - On top, the **pin pool** lays out every GP pin on the board. Each chip shows the pin name and its capability badges.
-- Below it, the **lanes**, one per function: digital input, digital output, PWM, ADC, I2C, UART.
+- Below it, the **lanes**, one per function: digital input, digital output, PWM, ADC, I2C, UART, SPI.
 
 Binding a pin has two forms, pick whichever you prefer:
 
@@ -187,7 +187,7 @@ It displays degrees Celsius by default. It occupies no physical pin and can run 
 
 ### 4.5 I2C
 
-I2C and UART are bus functions, so their UI is different: a lane holds **bus cards** rather than single pins.
+I2C, UART and SPI are bus functions, so their UI is different: a lane holds **bus cards** rather than single pins.
 
 Click "+ Add bus" at the bottom of the lane. A card appears with two labelled slots, SDA and SCL. Drag a pin badged D into the
 SDA slot and a pin badged S into the SCL slot.
@@ -240,6 +240,49 @@ Open a UART tab:
 Only the tab on screen receives data. Switch away and the push stops, so nothing wastes bandwidth.
 
 The Clear / Copy / Export buttons at the top follow the current tab: clear a UART tab and you clear that terminal.
+
+### 4.8 SPI
+
+Also a bus card, only with more pins: **SCK, MOSI, MISO** data slots plus up to four chip
+selects **CS0..CS3** (the number comes from `caps.spi.max_cs`).
+
+Like UART, a half bus is legal: **a bus without MOSI or without MISO still configures**, so
+transmit-only or receive-only are both normal. But **SCK is mandatory**, and at least one
+data line has to accompany it — a bare SCK is refused by the port (`Must provide MISO or
+MOSI pin`, measured).
+
+**Two things to watch on this lane:**
+
+- The data pins must all sit in **the same group**. Measured on the board, RP2350 has exactly
+  two:
+
+  | Group | SCK | MOSI | MISO |
+  | --- | --- | --- | --- |
+  | first | 2 / 6 / 18 / 22 | 3 / 7 / 19 / 23 | 0 / 4 / 16 / 20 |
+  | second | 10 / 14 / 26 | 11 / 15 / 27 | 8 / 12 / 24 / 28 |
+
+  Spanning the two groups is refused before anything goes to the device:
+  `SCK/MOSI/MISO must come from one pin group (one hardware SPI)`.
+  Each group is one hardware SPI, so **two buses at a time is the ceiling**; the third bus is
+  blocked in the UI (`This firmware supports at most {0} SPI buses`).
+
+- **Chip selects are free**. CS is not part of the SPI peripheral in this firmware: the line is
+  a plain output driven low around a transaction, so any unused GP can serve as CS. It still
+  counts as taken — once bound, the GPIO lane won't offer it.
+
+The bench runs one transaction at a time: hex bytes in Write(hex), how many bytes to read in
+Read bytes, which select to assert in the **Chip select** dropdown (— means drive none), and
+**Hold CS** leaves the line low when the transaction ends, which is what you want for a
+two-phase register read. Press **Transfer** and the result line looks like
+
+```
+03 14 25  ·  read 3 bytes  ·  actual 1973684 Hz
+```
+
+**That "actual" figure is the point**: the RP2 divider only produces 150 MHz over an even
+integer, with 75 MHz as the ceiling, so a request for 2 MHz really runs at 1973684 Hz and
+10 MHz at 9375000 Hz. Same honesty as the PWM lane's `hfreq` — the card reports what the
+hardware did, not what you typed.
 
 ---
 
@@ -344,6 +387,9 @@ These are traps already stepped in, collected here to save your time.
 | I2C pin pairs are fixed | SCL odd, SDA even, `SDA = SCL-1 (mod 4)`. Follow the S/D badges. |
 | UART on GP0/GP1 | Measured as claimed by the CircuitPython console in the old single-port build; on 0.1.14 with dual CDC they build a UART0 bus normally, and the capability table offers them. |
 | UART pins are fixed | Only certain pins can be TX or RX, and for full duplex both pins must be on the same UART. |
+| SPI data pins come in two groups | SCK/MOSI/MISO must all be from one group (the table in 4.8); spanning the groups builds nothing, and two groups means two buses. |
+| SPI clocks round down | The clock is 150 MHz divided by an even integer, ceiling 75 MHz. Measured: asking for 2 MHz runs at 1973684 Hz, 10 MHz at 9375000 Hz, and the result line says `actual {0} Hz`. |
+| SPI chip select is plain IO | The firmware drives CS as an output pin, so it uses no hardware SPI resource — but it does occupy a GP. |
 | Copying code.py reboots the board | The browser's serial connection drops, so you have to reconnect. |
 | Changing boot.py needs a hard reset | Press RESET or replug. A Ctrl-D soft reboot does not re-run boot.py, so the board still shows one port. |
 | The two COM ports are indistinguishable by name | They share one VID/PID, so the page identifies them with a nonce ping. When debugging by hand, send `{"cmd":"ping"}` and see which port answers. |

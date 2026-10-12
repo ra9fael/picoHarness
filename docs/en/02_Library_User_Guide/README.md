@@ -2,7 +2,7 @@
 
 This is a quick reference, not a tutorial. If you want to know how to use the harness, read the [01 User Manual](../01_GUIApp_FW_Manual/README.md) first.
 
-Every external interface of firmware version 0.1.15-pwmhz.
+Every external interface of firmware version 0.1.16-spi.
 
 ---
 
@@ -57,10 +57,12 @@ The host does **byte-level demultiplexing of the mixed stream**: it scans for th
 The device sends one event on startup:
 
 ```json
-{"evt":"ready","app":"PicoHarness","version":"0.1.15-pwmhz",
+{"evt":"ready","app":"PicoHarness","version":"0.1.16-spi",
  "cp":[10,3,1],"pins":29,
  "caps":{"pwm":[...],"adc":[...],"i2c_pairs":[[scl,sda],...],
          "uart":{"tx":[...],"rx":[...],"pairs":[[tx,rx],...]},
+         "spi":{"groups":[{"sck":[...],"mosi":[...],"miso":[...]},...],
+                "max_buses":2,"max_cs":4,"baud_ceiling":75000000},
          "usb":{"data":true}}}
 ```
 
@@ -73,31 +75,37 @@ The device sends one event on startup:
 | `caps.adc` | Array of pin numbers capable of ADC, including the virtual channel `100` (internal temperature) |
 | `caps.i2c_pairs` | Array of **ordered pairs**, each pair `[SCL, SDA]` |
 | `caps.uart` | `tx` array, `rx` array, and `pairs`, an array of ordered pairs (`[TX, RX]`) |
+| `caps.spi` | `groups`, the `sck/mosi/miso` pin arrays of each group, plus `max_buses`, `max_cs` and `baud_ceiling` |
 | `caps.usb.data` | Whether the protocol runs on its own data port (true once `boot.py` has taken effect) |
 
 `caps` is **probed**, not hardcoded: PWM and ADC are found by trying to build an object on every pin, I2C by exhausting the ordered pairs, UART from the fixed pin table in the RP2350 datasheet. So a different board, or pins claimed by someone else, is reflected in the UI as the board's true capability. The sweep runs once at boot and the result is cached; `hello` serves that cache.
 
+`caps.spi` is the one exception: it comes from the static `SPI_GROUPS` table in the firmware, and that table was **measured combination by combination** with `tools/spi_probe.py` on CircuitPython 10.3.1 / Pico 2 rather than derived from the datasheet (the two disagree about which pins are routable). There is no boot-time SPI sweep: the exhaustive version is 1600+ constructor calls and takes minutes, while the answer is a property of the silicon, not of the wiring, so scanning would never change it.
+
 On connect, the two CDC ports share one VID/PID, so `getInfo()` cannot tell them apart: the host pings **all** already-authorized ports in parallel and takes the one that echoes its nonce back as the protocol port (zero clicks). Connection starts on the first positive answer instead of waiting the silent ports out to their timeout. Role verdicts are cached for 4 s, so asking about the same ports again in one connect (the log-port attach right after) costs no new probe and a reconnect does not pay another round of timeouts. It then sends `hello` to fetch the payload above, without restarting the device; when `hello` is not answered (older firmware), reading the payload takes the restart path below too. When none of the authorized ports replies — `code.py` is not running, stopped at the REPL or crashed — it falls back to the legacy path: send `Ctrl+C` and `Ctrl+D` to the port that actually showed device traffic during the probe (`usb_cdc.data` ignores control bytes, which is why the candidate is ranked by who made noise), then wait for the `ready` line. That restart invalidates the "not the protocol port" verdicts, so the cache is dropped and the ports are asked again — no second port picker in between. If the device program restarts while the link is already up (RESET button, or `code.py` saved from Explorer), it broadcasts another `ready`; the UI shows it as "device program restarted" and refreshes the capability table.
 
-### 2.1 Pin Legality for I2C and UART
+### 2.1 Pin Legality for I2C, UART and SPI
 
-For these two functions the pins **do not combine freely**, and legality is a property of the pair, not of a single pin:
+For these functions the pins **do not combine freely**, and legality is a property of the set, not of a single pin:
 
 - **I2C (rp2 goes through PIO)**: `SCL` must be an odd GP, `SDA` must be an even GP, and `SDA ≡ SCL-1 (mod 4)` must hold. So GP8/GP10 (both even) can never form a bus.
 - **UART (rp2 hardware peripheral, not PIO)**: there are only two instances, UART0 and UART1. Even pins can be TX, odd pins can be RX; for full duplex the two pins must sit on the same instance. **GP0(TX) / GP1(RX) belong to UART0**: under the old single-port build they measured as taken by the CircuitPython serial console, while on this dual-CDC firmware they build a bus normally, so they are listed in `caps.uart` like any other pin.
 
+- **SPI (rp2 hardware peripheral)**: `caps.spi.groups` lists two pin groups, and **SCK/MOSI/MISO must all come from one group** — a set that spans groups makes `busio.SPI()` raise `Invalid pins`. The two groups are also the two peripherals, so at most `caps.spi.max_buses` buses can be live at once (a third measured as `SPI peripheral in use`). SCK is mandatory: passing it alone measures as `Must provide MISO or MOSI pin`, while a half bus that has SCK and only MOSI, or only MISO, builds fine. **CS is not in that table**: this port's `busio.SPI` does not handle chip select, so the firmware drives each CS as a plain output, which means any free GP can be a CS, up to `caps.spi.max_cs` of them.
+
 The host-side rule:
 
-| function | is one pin enough | when the pair is checked |
+| function | is one pin enough | when the set is checked |
 | --- | --- | --- |
 | I2C | No, both SDA and SCL must be filled | Only when both are filled, via `i2cPairOk` |
 | UART | **Yes**, send-only or receive-only is a legitimate use | Only when both are filled, via `uartPairOk` |
+| SPI | **Half**: SCK is mandatory, one of MOSI/MISO is enough | Every time a data pin is filled, via `spiSetOk` (same group) |
 
 ---
 
 ## 3. Command Reference
 
-21 commands. Except for `ping` / `echo`, the `data` of a successful reply is normally the state object described in section 4.
+24 commands. Except for `ping` / `echo`, the `data` of a successful reply is normally the state object described in section 4.
 
 ### 3.1 General
 
@@ -183,7 +191,51 @@ Bus objects are created **non-blocking** (`timeout=0`), so `uart.read` returns w
 
 With `tx` = -1, `uart.write` reports `this bus has no TX pin`; the same applies to `uart.read` with `rx` = -1.
 
-### 3.7 Event Subscription
+### 3.7 SPI
+
+| command | arguments | notes |
+| --- | --- | --- |
+| `spi.cfg` | `id`, `sck`, `mosi`(-1 means not connected), `miso`(-1 likewise), `cs`(array of pins, at most `caps.spi.max_cs`), `baud`(default 100000), `mode`(default 0, CPOL/CPHA) | Create the bus. Arguments identical to the current bus return immediately without rebuilding |
+| `spi.release` | `id` | Release the bus and every one of its members, including each CS |
+| `spi.xfer` | `id`, `w`(byte array), `r`(byte count 0..4096), `cs`(index into `cs`, -1 keeps every CS high), `hold`(bool, leave CS low afterwards) | Full-duplex raw transaction |
+
+`spi.cfg` validates in this order, and errors arrive in the same order:
+
+| # | exact message | when |
+| --- | --- | --- |
+| 1 | `busio.SPI on rp2 needs at least a MOSI or a MISO pin` | `mosi` and `miso` are both -1 (a lone SCK cannot run) |
+| 2 | `mode must be 0..3 (CPOL/CPHA)` | `mode` out of range |
+| 3 | `at most %d CS lines per bus` | more `cs` entries than `SPI_MAX_CS` |
+| 4 | `pin out of range` | a pin number outside 0..`NUM_PINS-1` |
+| 5 | `one pin cannot hold two SPI roles` | the same pin appears twice among SCK/MOSI/MISO/CS |
+| 6 | `SPI GP%d(SCK)/GP%d(MOSI)/GP%d(MISO) is not a routable set: ...` | the three data pins do not come from one group |
+| 7 | `GP%d already belongs to SPI bus %d — release it first` | the pin is held by another live SPI bus |
+| 8 | `could not build SPI on GP%d/GP%d/GP%d: ...` | the underlying `busio.SPI` construction failed; the usual inner message is `SPI peripheral in use` |
+| 9 | `SPI GP%d configure failed: ...` | `configure()` failed once the lock was held |
+
+Rule 7 cannot be left to `claim()`: both buses would write `owner[] = "spi"`, so the claim
+would succeed silently, the construction afterwards would fail, and the rollback would clear
+the claim on a pin **the other bus is still driving**.
+
+`spi.xfer` replies with:
+
+```json
+{"rd": [byte...], "cs": selected index, "held": whether CS stayed low, "hbaud": actual clock, "mode": mode}
+```
+
+`w` and `r` may be given singly or together (write N bytes while reading N back). `cs` is an **index**, not a pin number: `0` drives the first entry of the `cs` array, and `-1` keeps every CS high, which is what you want for a pure clock grab. `hold: true` is for segmented transactions — CS does not come up, so the next `spi.xfer` continues the same selection; send one more with `hold: false` afterwards to put it back.
+
+This port has exactly one full-duplex call, `write_readinto()`, and it wants two equal-length buffers, so the firmware pads a short write with `0xFF` idle clocks and hands back only the first `r` bytes of a longer read:
+
+```python
+n = max(len(w), rlen)          # clock count is the larger of the two
+tx = bytearray(b"\xff" * n); tx[:len(w)] = w
+obj.write_readinto(tx, rx); rd = rx[:rlen]
+```
+
+`hbaud` is **the clock the divider actually produced**, not the one you requested. The rp2 divides the 150 MHz system clock by an **even** integer, ceiling 75 MHz (`caps.spi.baud_ceiling`), so 9600 comes out as 9599 Hz, 2 MHz as 1973684 Hz, and 10 MHz as 9375000 Hz. The same honesty the PWM lane applies with `hfreq`.
+
+### 3.8 Event Subscription
 
 MQTT-style switches that control what the device pushes on its own.
 
@@ -222,8 +274,10 @@ What `gpio.state` returns, and the `data` of most other commands.
 | `i2c` | array | `[{"id":i,"sda":n,"scl":n,"freq":h}, ...]` |
 | `cfg_uart` | bit mask | Pins held by UART |
 | `uart` | array | `[{"id":i,"tx":n,"rx":m,"baud":h}, ...]` (the side that is not connected is -1) |
+| `cfg_spi` | bit mask | Pins held by SPI, **including every CS** |
+| `spi` | array | `[{"id":i,"sck":n,"mosi":n,"miso":n,"cs":[n,...],"baud":h,"hbaud":h,"mode":m}, ...]` (a side that is not connected is -1) |
 
-The host compares this state against its own expectations and re-sends the configuration whenever it finds drift. That is the mechanism that lets the board heal itself even after it was rebooted. The bus arrays (`i2c` / `uart`) take part in the drift comparison as a signature built from sorted `id:primary,secondary,clock` entries.
+The host compares this state against its own expectations and re-sends the configuration whenever it finds drift. That is the mechanism that lets the board heal itself even after it was rebooted. The bus arrays (`i2c` / `uart` / `spi`) take part in the drift comparison as a signature built from sorted `id:member,member,...` entries; the SPI signature carries the CS order, `baud` and `mode`, so losing one CS line also reads as drift. `hbaud` is the clock the divider actually reached, while the value you requested stays in `baud` — the two may differ.
 
 ---
 
@@ -254,6 +308,8 @@ Every hardware operation is arbitrated through one `owner[]` table:
 
 So "a pin belongs to one function" is guaranteed by the firmware, not by UI discipline. Reloading the page or opening two windows at once cannot leave both sides convinced the pin is theirs.
 
+The three bus functions are named `"i2c"`, `"uart"` and `"spi"`. SPI registers SCK, MOSI, MISO and **each CS line** under the same `owner="spi"`, because `busio.SPI` has no per-pin release — letting go of any one member tears the whole bus down, and `spi.release` only accepts a bus id. CS counting as "occupied" has a concrete reason: it is an ordinary output line, so if the UI allowed `gpio.set` on it, the host could select or release a device in the middle of a transaction.
+
 ---
 
 ## 7. Versioning and Compatibility
@@ -262,4 +318,4 @@ The `version` field is the first thing to compare when deciding whether the devi
 
 If the UI reports `unknown cmd: xxx`, or the `gpio.state` reply is missing fields such as `cfg_uart` / `uart`, then almost always **the board is still running an old `code.py`**; the host is not at fault. Check `version` first, and re-copy `code.py` if needed.
 
-When an old firmware has no `caps.i2c_pairs` / `caps.uart`, the host's pin validation relaxes and lets the choice pass. The device is the final arbiter anyway, and a pairing that does not work reports a clear error.
+When an old firmware has no `caps.i2c_pairs` / `caps.uart` / `caps.spi`, the host's pin validation relaxes and lets the choice pass. The device is the final arbiter anyway, and a pairing that does not work reports a clear error. SPI is the clearest case: without `caps.spi.groups` any pin combination can be placed, and it is `spi.cfg`'s "not a routable set" error that closes the loop; the CS and bus limits fall back to their defaults of 4 lines and 2 buses, and the UI stops filtering the clock presets by ceiling.

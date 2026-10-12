@@ -2,7 +2,7 @@
 
 这篇是速查手册，不是教程。想知道怎么用先看 [01 使用手册](../01_GUIApp_FW_Manual/README.md)。
 
-固件版本 0.1.15-pwmhz 的全部对外接口。
+固件版本 0.1.16-spi 的全部对外接口。
 
 ---
 
@@ -66,10 +66,12 @@ payload 第一个字节是 **kind**，标识这是哪种流：
 设备启动时主动发一条事件：
 
 ```json
-{"evt":"ready","app":"PicoHarness","version":"0.1.15-pwmhz",
+{"evt":"ready","app":"PicoHarness","version":"0.1.16-spi",
  "cp":[10,3,1],"pins":29,
  "caps":{"pwm":[...],"adc":[...],"i2c_pairs":[[scl,sda],...],
          "uart":{"tx":[...],"rx":[...],"pairs":[[tx,rx],...]},
+         "spi":{"groups":[{"sck":[...],"mosi":[...],"miso":[...]},...],
+                "max_buses":2,"max_cs":4,"baud_ceiling":75000000},
          "usb":{"data":true}}}
 ```
 
@@ -82,11 +84,18 @@ payload 第一个字节是 **kind**，标识这是哪种流：
 | `caps.adc` | 能做 ADC 的脚号数组，含虚拟通道 `100`（内部温度） |
 | `caps.i2c_pairs` | **有序对**数组，每对是 `[SCL, SDA]` |
 | `caps.uart` | `tx` 数组、`rx` 数组、`pairs` 有序对数组（`[TX, RX]`） |
+| `caps.spi` | `groups` 每组的 `sck/mosi/miso` 脚号数组，外加 `max_buses`、`max_cs`、`baud_ceiling` |
 | `caps.usb.data` | 协议是否跑在独立的 data 口上（`boot.py` 生效即为 true） |
 
 `caps` 是**探测出来的**，不是硬编码：PWM/ADC 靠逐脚试建对象，I2C 靠穷举有序对试建，
 UART 用 RP2350 数据手册的固定引脚表。所以换板子、脚被占用，界面会自动反映真实能力。
 探测只在开机时做一次并缓存，`hello` 复用的就是这份缓存。
+
+**`caps.spi` 是唯一的例外**：它来自固件里的静态表 `SPI_GROUPS`，而这张表是用
+`tools/spi_probe.py` 在 CircuitPython 10.3.1 / Pico 2 上**逐组合实测**出来的，
+不是照数据手册推的（两者对"哪些脚可路由"的说法并不一致）。
+开机时不做 SPI 扫描：穷举要 1600 多次构造调用、耗时按分钟算，
+而这个答案是芯片的属性，不是接线的属性，扫了也不会变。
 
 主机连接时的动作：两个 CDC 口共用同一 VID/PID，`getInfo()` 区分不了，所以给每个已授权端口
 **并行**发 `ping`，回带 nonce 的那个才是协议口（零点击）；第一个正答复一到就开始连接，
@@ -100,9 +109,9 @@ UART 用 RP2350 数据手册的固定引脚表。所以换板子、脚被占用�
 设备程序在链路建立之后自己重启时（按 RESET、或从资源管理器保存 `code.py`），会再广播一条
 `ready`，界面把它当作"设备已重启"提示并刷新能力表。
 
-### 2.1 关于 I2C 和 UART 的合法性
+### 2.1 关于 I2C / UART / SPI 的合法性
 
-这两类功能的引脚**不是任意组合都行**，而且合法性是"对"的属性，不是"单脚"的属性：
+这几类功能的引脚**不是任意组合都行**，而且合法性是"对"的属性，不是"单脚"的属性：
 
 - **I2C（rp2 走 PIO）**：SCL 必须奇数脚、SDA 必须偶数脚，且满足 `SDA ≡ SCL-1 (mod 4)`。
   所以 GP8/GP10（都是偶数）永远配不成总线。
@@ -110,6 +119,12 @@ UART 用 RP2350 数据手册的固定引脚表。所以换板子、脚被占用�
   全双工时两脚必须落在同一路实例上。**GP0(TX) / GP1(RX) 属于 UART0**：单口那会儿实测被
   CircuitPython 串口控制台占用，这版双口固件上实测可以正常建总线，所以它们和其它脚一样
   出现在 `caps.uart` 里。
+- **SPI（rp2 硬件外设）**：`caps.spi.groups` 给出两组脚，**SCK/MOSI/MISO 必须全在同一组内**，
+  跨组时 `busio.SPI()` 直接报 `Invalid pins`。两组也正好对应两路外设，所以同时最多
+  `caps.spi.max_buses` 路总线（实测第三路报 `SPI peripheral in use`）。SCK 是必须的，
+  只给 SCK 不给数据脚时报 `Must provide MISO or MOSI pin`，缺 MOSI 或缺 MISO 的半总线则能建起来。
+  **CS 不在这张表里**：这个端口的 `busio.SPI` 不管片选，固件用普通输出脚拉低/拉高，
+  所以任何空闲 GP 都能当 CS，上限 `caps.spi.max_cs` 路。
 
 主机侧的判定规则：
 
@@ -117,12 +132,13 @@ UART 用 RP2350 数据手册的固定引脚表。所以换板子、脚被占用�
 | --- | --- | --- |
 | I2C | 不算，SDA 和 SCL 都要填 | 两个都填了才查 `i2cPairOk` |
 | UART | **算**，只发或只听是合理用法 | 两个都填了才查 `uartPairOk` |
+| SPI | **半算**：SCK 必须有，MOSI/MISO 有一个就够 | 每次填数据脚都查 `spiSetOk`（同组） |
 
 ---
 
 ## 3. 命令总表
 
-21 条。除 `ping` / `echo` 外，成功的应答 `data` 通常就是第 4 节那份 state 对象。
+24 条。除 `ping` / `echo` 外，成功的应答 `data` 通常就是第 4 节那份 state 对象。
 
 ### 3.1 通用
 
@@ -220,7 +236,56 @@ raw = v / 3.3 * 65535
 
 `tx` 为 -1 时 `uart.write` 报 `this bus has no TX pin`；`rx` 为 -1 时 `uart.read` 同理。
 
-### 3.7 事件订阅
+### 3.7 SPI
+
+| 命令 | 参数 | 说明 |
+| --- | --- | --- |
+| `spi.cfg` | `id`, `sck`, `mosi`(-1 表示不接), `miso`(-1 同上), `cs`(引脚数组，最多 `caps.spi.max_cs` 路), `baud`(默认 100000), `mode`(默认 0，CPOL/CPHA) | 建总线。参数与现状完全相同则直接返回不重建 |
+| `spi.release` | `id` | 释放总线与其全部成员（含每路 CS） |
+| `spi.xfer` | `id`, `w`(字节数组), `r`(读字节数 0..4096), `cs`(片选下标，-1 表示全程不拉低任何 CS), `hold`(bool，事务结束保持拉低) | 全双工原始事务 |
+
+`spi.cfg` 的校验顺序，报错就按这个顺序来：
+
+| 顺序 | 报错原文 | 触发条件 |
+| --- | --- | --- |
+| 1 | `busio.SPI on rp2 needs at least a MOSI or a MISO pin` | `mosi` 和 `miso` 都是 -1（SCK 单独一条线跑不起来） |
+| 2 | `mode must be 0..3 (CPOL/CPHA)` | `mode` 越界 |
+| 3 | `at most %d CS lines per bus` | `cs` 数量超过 `SPI_MAX_CS` |
+| 4 | `pin out of range` | 任一引脚号不在 0..`NUM_PINS-1` |
+| 5 | `one pin cannot hold two SPI roles` | 同一个脚出现在 SCK/MOSI/MISO/CS 里两次 |
+| 6 | `SPI GP%d(SCK)/GP%d(MOSI)/GP%d(MISO) is not a routable set: ...` | 三个数据脚不在同一引脚组 |
+| 7 | `GP%d already belongs to SPI bus %d — release it first` | 该脚已被另一条在跑的 SPI 总线占用 |
+| 8 | `could not build SPI on GP%d/GP%d/GP%d: ...` | 底层 `busio.SPI` 构造失败，典型内层消息是 `SPI peripheral in use` |
+| 9 | `SPI GP%d configure failed: ...` | 拿锁后 `configure()` 失败 |
+
+第 7 条不能交给 `claim()` 去做：两条总线的 `owner[]` 都写 `"spi"`，
+`claim` 会静默成功，随后构造才失败，而回滚会把**另一条总线还在驱动的脚**解除声明。
+
+`spi.xfer` 的返回：
+
+```json
+{"rd": [字节...], "cs": 片选下标, "held": 是否保持拉低, "hbaud": 实际时钟, "mode": 模式}
+```
+
+`w` 与 `r` 可以只给一个，也可以同时给（写 N 字节同时读 N 字节）。`cs` 是**下标**不是引脚号：
+`0` 用 `cs` 数组的第一个脚，`-1` 表示所有 CS 保持高电平（纯时钟抓取）。
+`hold: true` 用来做分片事务——片选不抬，下一次 `spi.xfer` 接着同一次选中往下传，
+记得事后再发一次 `hold: false` 把它放回来。
+
+这个口的全双工只有 `write_readinto()` 一个调用，而且要求两个等长缓冲区，
+所以固件把短的 `w` 用 `0xFF` 空闲时钟补齐，读回来只截前 `r` 个字节：
+
+```python
+n = max(len(w), rlen)          # 时钟数取两者较大
+tx = bytearray(b"\xff" * n); tx[:len(w)] = w
+obj.write_readinto(tx, rx); rd = rx[:rlen]
+```
+
+`hbaud` 是**分频器实际跑出来的时钟**，不是你请求的那个。rp2 把 150 MHz 系统时钟除以
+**偶数**整数，上限 75 MHz（`caps.spi.baud_ceiling`），所以 9600 实际是 9599 Hz、
+2 MHz 实际是 1973684 Hz、10 MHz 实际是 9375000 Hz。和 PWM 的 `hfreq` 同一个诚实口径。
+
+### 3.8 事件订阅
 
 MQTT 风格的开关，用来控制设备主动推什么。
 
@@ -261,9 +326,13 @@ MQTT 风格的开关，用来控制设备主动推什么。
 | `i2c` | 数组 | `[{"id":i,"sda":n,"scl":n,"freq":h}, ...]` |
 | `cfg_uart` | 位掩码 | 被 UART 占用的脚 |
 | `uart` | 数组 | `[{"id":i,"tx":n,"rx":m,"baud":h}, ...]`（未接的一侧为 -1） |
+| `cfg_spi` | 位掩码 | 被 SPI 占用的脚，**每路 CS 也算** |
+| `spi` | 数组 | `[{"id":i,"sck":n,"mosi":n,"miso":n,"cs":[n,...],"baud":h,"hbaud":h,"mode":m}, ...]`（未接的一侧为 -1） |
 
 主机拿这份 state 和自己的期望值比，发现漂移就重发配置。这就是"板子被重启过也能自愈"的机制。
-总线数组（`i2c` / `uart`）参与漂移比对，格式是 `id:主,备,时钟` 排序拼接的签名。
+总线数组（`i2c` / `uart` / `spi`）参与漂移比对，格式是 `id:成员,成员,...` 排序拼接的签名；
+SPI 的签名里带 `cs` 顺序、`baud` 与 `mode`，所以片选少一路也会被判成漂移。
+`hbaud` 是分频器实际跑出来的时钟，请求值放在 `baud`，两者可以不同。
 
 ---
 
@@ -299,6 +368,12 @@ MQTT 风格的开关，用来控制设备主动推什么。
 所以"一个脚只属于一个功能"是固件保证的，不靠界面自觉。页面刷新、两个窗口同时开，
 都不会出现两边都以为脚是自己的情况。
 
+三条总线的功能名分别是 `"i2c"`、`"uart"`、`"spi"`。SPI 把 SCK、MOSI、MISO 和**每一路 CS**
+都登记在同一个 `owner="spi"` 下，因为 `busio.SPI` 没有逐脚释放的接口——
+释放任意一个成员就是把整条总线拆掉（`spi.release` 也只认总线号）。
+CS 被算成"已占用"是有实际理由的：它是一根普通输出线，
+如果界面允许对它做 `gpio.set`，主机就能在事务中间把某器件选中或松开。
+
 ---
 
 ## 7. 版本与兼容
@@ -309,5 +384,7 @@ MQTT 风格的开关，用来控制设备主动推什么。
 几乎总是**板子上跑的还是旧 `code.py`**，不是上位机的问题。
 先核对 `version`，必要时重新复制 `code.py`。
 
-老固件没有 `caps.i2c_pairs` / `caps.uart` 时，主机的引脚校验会宽松放行——
-反正设备才是最终裁决者，配不上会明确报错。
+老固件没有 `caps.i2c_pairs` / `caps.uart` / `caps.spi` 时，主机的引脚校验会宽松放行——
+反正设备才是最终裁决者，配不上会明确报错。SPI 尤其如此：没有 `caps.spi.groups`
+时任何引脚组合都摆得进去，是 `spi.cfg` 那条 routable set 报错来收尾的；
+片数上限和时钟上限也退成默认的 4 路 CS / 2 条总线，界面不再过滤高频预设。
