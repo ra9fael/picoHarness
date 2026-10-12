@@ -100,8 +100,10 @@ GP7 ── 330Ω ── LED anode, LED cathode ── GND
 **Two traps you will certainly hit**:
 
 - **The two pins of one slice are tied to the same frequency.** An rp2 PWM slice has one counter shared by two pins,
-  so they can only run one frequency. To run two different frequencies, pick pins that are not paired
-  (GP7 and GP11 are in different slices), or accept the shared frequency and vary only duty. Asking the second pin for
+  so they can only run one frequency. To run two different frequencies, compute each pin's slice —
+  `(n // 2) mod 8` for n ≤ 31, `8 + ((n - 32) mod 8) // 2` for n ≥ 32 — and pick pins whose results differ
+  (GP7 is slice 3, GP11 is slice 5); **"not adjacent" is not the same as "not the same slice"**, because
+  GP16/GP17 wrap back to slice 0. Or accept the shared frequency and vary only duty. Asking the second pin for
   another frequency does not overwrite the first: `pwm.cfg` fails with `Conflicting settings for shared resource` and
   that pin goes back to the pool.
 - **There is a low-frequency floor.** Fixed-frequency mode on the rp2 accepts integer Hz only, and the measured floor
@@ -135,9 +137,12 @@ GND     ── device GND
 3. Pick the clock (100 kHz by default) and the card becomes "configured".
 4. Leave the address field empty or click scan, and you get the list of online addresses.
 
-**Why so many pins are unusable**: I2C on the rp2 is implemented with PIO, and legality is a property of a **pair of pins**, not of one pin.
-The rule is: SCL takes an odd GP, SDA takes an even GP, and `SDA ≡ SCL−1 (mod 4)`. So two even pins such as GP8 and GP10 can never form a bus.
-`caps.i2c_pairs` in the handshake log holds the exhaustively enumerated legal table, and the UI highlighting follows it exactly.
+**Why so many pins are unusable**: I2C on the rp2 runs on the **hardware DW_apb_i2c peripherals, not PIO** (there is no bit-bang
+fallback), and legality is a property of a **pair of pins**, not of one pin.
+The rule is: SCL takes an odd GP, SDA takes an even GP, and `SDA ≡ SCL−1 (mod 4)` — the two pins need not be adjacent, so
+GP13 with GP4 is a pair. So two even pins such as GP8 and GP10 can never form a bus.
+`caps.i2c_pairs` in the handshake log holds the complete legal table, enumerated from that rule and confirmed by the firmware
+actually building each bus, and the UI highlighting follows it exactly.
 
 **`No pull up found on SDA or SCL` does not mean you chose the wrong pins.** The message means the pair is legal but the two lines are not
 being pulled high. The typical causes are no device attached, no pull-ups, or VCC/GND forgotten. Check the wiring, not the code.
@@ -302,7 +307,7 @@ UART tabs also yield to the main terminal when you enter the REPL and unsubscrib
 | `RuntimeError: no such bus (configure it first)` | The bus does not exist on the device: it was rejected, its pins were illegal, or the board just rebooted and lost volatile configuration | Check the `uart`/`i2c` lists in the handshake log. Reconnect once: the new handshake clears the "rejected" latch and replays `cfg`. |
 | `ValueError: Invalid pins` (I2C) | The pin pair is illegal: SCL is not odd, or SDA does not satisfy `SDA ≡ SCL−1 (mod 4)` | Pick a different pair, or just read `caps.i2c_pairs`. |
 | `RuntimeError: No pull up found on SDA or SCL` | The pair is legal; the lines are simply not pulled high | Check the wiring, the pull-ups, and VCC/GND. Do not change code. |
-| `ValueError: ... GP1 in use` (or GP0) | The CircuitPython console holds that pair of the rp2350 UART0 | Use a different pairing such as GP6/GP7 or GP12/GP13. |
+| `ValueError: ... GP1 in use` (or GP0) | **Only on the old single-port build**, where the CircuitPython console held that UART0 pair. Since 0.1.14 the protocol lives on its own data port and `uart.cfg tx=0 rx=1` builds the bus (retested on hardware) | If you are still on a single-port build, add `boot.py` and hard-reset; otherwise use another pairing such as GP6/GP7 (UART1) |
 | `RuntimeError: pin GP7 busy` | The pin already belongs to another function | Unbind the chip from the old lane first, then bind the new one. |
 | `ValueError: freq < 1 Hz: PWMOut takes whole hertz` | Fixed-frequency mode on the rp2 accepts integer Hz only | Enter a whole frequency of 1 or more. Before reaching for the mHz unit, confirm the device accepts it. |
 | `Invalid variable_frequency` | Two pins in one slice want different frequencies, or you changed `.frequency` in fixed-frequency mode | Accept the shared frequency, or move the two pins into different slices. |

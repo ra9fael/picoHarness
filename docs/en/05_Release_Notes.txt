@@ -5,13 +5,44 @@ repository commit. UI and firmware must be used as a matched pair: an old firmwa
 recognise new commands and answers "unknown cmd".
 
 
+[20261013 0.1.17-gp29]
+
+GP29 on the Pico 2 joined the pool. It is never spelled "GP29" — the board table declares it only
+as A3 / VOLTAGE_MONITOR, and a CircuitPython Pin object exposes no number, so the old filter
+("the name must contain GPn") treated it as nonexistent. The firmware now walks every Pin object on
+board, deduplicates by identity, and reads the number off the declared name where one carries a GP
+token; a pin whose only names are ADC aliases is numbered ADC_BASE + channel, ADC_BASE being the pin
+behind A0 — declared as board.GP26_A0 here, so A3 = 29. Nothing about that is hardcoded per board:
+the whole rule is computed from the device.
+
+Measured on the board, GP29 does everything, and the capability tables widened with it: caps.adc
+gained 29, and reading it gives VSYS/3 (raw 31815 -> 1.600 V -> VSYS ~ 4.80 V); caps.pwm is now 30
+pins; caps.uart.rx gained 29; caps.i2c_pairs gained the eight pairs with SCL=29, and 29/28 measured
+as "no pull up found", which is the sign of a routable pair. Over the protocol each path was walked
+once: adc.cfg, pwm.cfg (reporting hfreq 990), gpio.cfg with it as an output, and uart.cfg
+tx=28 rx=29 were all accepted.
+
+Two UART measurements also got pinned down: UART(TX=GP28, RX=GP27) raises Invalid pins, which is not
+the parity rule failing but the instance rule — 28 sits on UART0 and 27 on UART1, so they cannot form
+one full-duplex pair; on their own, 28 works as a TX and 27 as an RX, and each built a bus. The live
+half of tools/caps_audit.py now reconciles these tables against the documentation on hardware and is
+green; against firmware that has no gp field it says "deploy the new firmware first" instead of
+comparing against a fabricated contiguous range.
+
+UI and docs followed: the pool grows GP29 on its own from caps.gp, and 01/02/04 restate the
+addressable set as "the pins the board declares, numbered out of the declared name, with an
+alias-only ADC pin numbered ADC_BASE + channel" instead of "the pins named GPn", quoting the
+measurements above.
+
+
 [20261012 0.1.16-spi]
 
 SPI buses arrived. The firmware gained spi.cfg / spi.release / spi.xfer, read_state gained cfg_spi
 and the spi list, and ready.caps gained the spi object (groups / max_buses / max_cs / baud_ceiling).
 
-Pin legality comes from tools/spi_probe.py run on the board, not from the datasheet — the two really
-do disagree about which pins are routable. The sweep tried every ordered (SCK, partner) combination:
+Pin legality was measured on the board with tools/spi_probe.py and then cross-checked against the F1
+column of pico-sdk hardware/gpio.h — the two agree row for row. The sweep tried every ordered
+(SCK, partner) combination:
 53 were accepted and they fall into exactly two groups, 1571 pairs raised Invalid pins, and the 100
 accepted triples are the cross-product of those groups. The conclusion is stored as the static
 SPI_GROUPS table with no boot-time sweep, because the exhaustive version is 1600+ constructor calls
@@ -36,6 +67,22 @@ that runs one raw byte transaction at a time. Hold CS segments a transaction in 
 in the chip-select dropdown runs the clocks without asserting anything. Cross-group pins cannot be
 dropped, and a third bus is refused in the UI. The configuration persists with the other buses, and
 drift reconciliation folds CS order, baud and mode into the signature.
+
+In the same build (no version bump) "which pins does this board have" was rebuilt against the official
+documentation. The addressable set is package GPIO count ∩ the names CircuitPython's board definition
+exports; the firmware reads it off board at boot and reports it as the new ready field gp (a Pico 2 W
+has holes: no GP23/24/25, and GP29 only as A3/VOLTAGE_MONITOR). The meaning of caps.pins changed to
+match: highest named pin number + 1, no longer a pin count. SPI_GROUPS is the complete 48-row F1
+column of gpio.h, projected onto gp before it is sent, so the UI, the mock and the firmware all read the
+same set and the hardcoded pin counts are gone. Host-side masks now set and test bits with 2**n
+because JS 1<<n wraps at n>=32; a 48-bit mask is still inside the exact-integer range.
+tools/caps_audit.py is new: --static lays the documented rules over all 48 pin numbers and parses
+SPI_GROUPS and the UART instance formula out of code.py, and with a board attached it audits the live
+caps. Both manuals now quote the exact conditions from gpio.h / platform_defs.h / the CP common-hal
+sources instead of paraphrasing: I2C is the hardware DW_apb_i2C rather than PIO (an earlier entry in this
+file called it PIO — that line was wrong) and a pair need not be
+adjacent, UART is even-TX/odd-RX with instance ((n+4)//8)%NUM_UARTS, and PWM wraps back to slice 0 at
+GP16 ("not adjacent" is not the same as "not the same slice").
 
 
 [20261012 0.1.15-pwmhz]

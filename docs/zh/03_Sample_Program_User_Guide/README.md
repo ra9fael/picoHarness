@@ -100,8 +100,10 @@ GP7 ── 330Ω ── LED 正极，LED 负极 ── GND
 **两个一定会踩的坑**：
 
 - **同一 slice 的两个脚，频率是绑在一起的**。rp2 的 PWM 一个 slice 只有一台计数器，
-  两个脚共用一个频率。想两个脚跑不同频率，就选不相邻的脚（例如 GP7 和 GP11 不在同一
-  slice），或者干脆接受同频只改占空比。给第二个脚要求别的频率时，`pwm.cfg` 不会覆盖
+  两个脚共用一个频率。想两个脚跑不同频率，就按 `(n // 2) mod 8`（n ≥ 32 用
+  `8 + ((n - 32) mod 8) // 2`）算出各自属于哪个 slice，选算出来不同的（例如 GP7 是 slice 3、
+  GP11 是 slice 5）——**"不相邻"不等于"不同 slice"**，GP16/GP17 就又绕回 slice 0。
+  或者干脆接受同频只改占空比。给第二个脚要求别的频率时，`pwm.cfg` 不会覆盖
   第一个脚，而是直接失败回 `Conflicting settings for shared resource`，那个脚回到引脚池。
 - **低频有下限**。rp2 固定频率模式只吃整数 Hz，实测最低 9 Hz：填 1～8 Hz 板子都跑 9 Hz，
   高频也会量化（1 kHz 实际 990 Hz）。固件把真实频率回报给界面，频率框会变琥珀色并写明
@@ -133,10 +135,12 @@ GND     ── 器件 GND
 3. 选时钟（默认 100 kHz），卡片变"已建立"。
 4. 在地址框留空或点扫描，得到在线地址列表。
 
-**为什么很多脚用不了**：rp2 的 I2C 是 PIO 实现的，合法与否是**一对引脚**的属性，
-不是单个引脚的属性。规则是：SCL 取奇数 GP，SDA 取偶数 GP，且 `SDA ≡ SCL−1 (mod 4)`。
+**为什么很多脚用不了**：rp2 的 I2C 走**硬件 DW_apb_i2c 外设**（不是 PIO，也没有位模拟兜底），
+合法与否是**一对引脚**的属性，不是单个引脚的属性。规则是：SCL 取奇数 GP，SDA 取偶数 GP，
+且 `SDA ≡ SCL−1 (mod 4)`（两脚不必相邻，GP13+GP4 也算一对）。
 所以 GP8/GP10 这样两个偶数脚永远配不成一条总线。
-握手日志的 `caps.i2c_pairs` 里是穷举出来的完整合法表，界面高亮就是照它来的。
+握手日志的 `caps.i2c_pairs` 里是按这条规则枚举、再由固件真建一次确认的完整合法表，
+界面高亮就是照它来的。
 
 **`No pull up found on SDA or SCL` 不是引脚选错了**。这条报错的意思是"引脚对合法，
 但两条线没有被拉到高电平"——典型原因是没接器件、没接上拉、或者 VCC/GND 忘了接。
@@ -300,7 +304,7 @@ FF EF 40 18  ·  读回 4 字节  ·  实际 1000000 Hz
 | `RuntimeError: no such bus (configure it first)` | 这条总线在设备上并不存在：被拒绝过、引脚非法、或板子刚重启丢了易失配置 | 看握手日志确认 `uart`/`i2c` 列表；重连一次（新握手会清掉"已拒绝"闩锁，自动重发 `cfg`） |
 | `ValueError: Invalid pins`（I2C） | 引脚对不合法：SCL 不是奇数，或 SDA 不满足 `SDA ≡ SCL−1 (mod 4)` | 换一对，或直接看 `caps.i2c_pairs` |
 | `RuntimeError: No pull up found on SDA or SCL` | 引脚对是合法的，只是线没被拉高 | 查接线、上拉、VCC/GND，别改代码 |
-| `ValueError: ... GP1 in use`（或 GP0） | CircuitPython 控制台占用了 rp2350 UART0 的那对脚 | 换 GP6/GP7、GP12/GP13 之类的配对 |
+| `ValueError: ... GP1 in use`（或 GP0） | **只有旧单口固件这样**：那时这对脚被 CircuitPython 控制台占着。0.1.14 起协议跑在独立 data 口，实测 `uart.cfg tx=0 rx=1` 建得起来 | 还在单口形态上就先补 `boot.py` 并硬复位；否则换 GP6/GP7（UART1）这类配对 |
 | `RuntimeError: pin GP7 busy` | 这个脚已经属于别的功能 | 先把旧泳道上的芯片解绑，再绑新的 |
 | `ValueError: freq < 1 Hz: PWMOut takes whole hertz` | rp2 固定频率模式只收整数 Hz | 频率填 ≥1 的整数，低频需求用 mHz 档前先确认设备侧接受 |
 | `Invalid variable_frequency` | 同 slice 两脚要不同频率，或固定频率模式改 `.frequency` | 接受同频，或把两脚分到不同 slice |

@@ -110,7 +110,13 @@ ready.caps 里没有 uart/i2c_pairs/spi —— 这不是前端 bug，是 G:\code
 只看到一个 COM 口、或 ready.caps.usb.data 为 false —— 是 G:\boot.py 没拷进去，
 或者拷完没做硬复位（Ctrl-D 不算）。
 ready.caps.spi 里的引脚组和别处实测不一致 —— 那是 SPI_GROUPS 这张静态表的问题，
-它不会自己变，重扫请跑 tools/spi_probe.py，别去改探测逻辑（开机不扫 SPI）。
+它是 pico-sdk hardware/gpio.h F1 列的完整转录（GP0..GP28 行另有上板实测逐行确认），
+开机不做 SPI 扫描，也别去改探测逻辑。注意出厂前它还按 caps.gp 投影一次：
+某个脚从组里消失通常是板级定义没声明它，不是表错了。
+界面引脚池少脚 / 某脚点不进去，而 caps 数组里有它 —— 先看 ready.gp 在不在、包不包含那个脚；
+gp 是这块板能取到的脚的集合（从 board 的 Pin 对象算出来的），缺了就是 G:\code.py 还是旧版本。
+离线核对跑 tools/caps_audit.py（--static 把 gpio.h / platform_defs.h / CP 源码里读到的规则
+铺满 48 个脚号做自校，并解析固件里的 SPI_GROUPS 与 UART 实例式；接上板子再加真机对账）。
 
 [固件实现要点]
 
@@ -139,7 +145,23 @@ SPI 这几条同样是 tools/spi_probe.py 实测出来的，别再照数据手�
 只给 SCK 会被拒（Must provide MISO or MOSI pin），所以速率和模式要建好之后在锁内
 `configure()`（不锁就报 Function requires lock）；`.frequency` 回的是分频器实际到达的值，
 150 MHz 除以偶数、上限 75 MHz，所以 `hbaud` 必须回给主机；
-可路由的 (SCK, MOSI, MISO) 组合是静态表 SPI_GROUPS，开机不扫描（穷举要 1600+ 次构造）。
+可路由的 (SCK, MOSI, MISO) 组合是静态表 SPI_GROUPS，它是 gpio.h F1 列的完整转录，
+GP0..GP28 行另有 tools/spi_probe.py 的上板实测逐行确认过；30..47 是 QFN-80 专属行，
+发 caps 前按 gp 投影。开机不扫描（穷举要 1600+ 次构造）。
+
+引脚相关的四条实现约束（每一条都能在上面引的官方源码里核到，动引脚逻辑前先看）：
+
+1. 可寻址集合 = 封装 GPIO ∩ board 里声明过的脚。Pin 对象身上没有号码可读，号码从声明名解析：
+   GPn 直接读；只有 ADC 别名的脚（Pico 2 的 A3/VOLTAGE_MONITOR）按 ADC_BASE + 通道号算，
+   ADC_BASE 取 A0 背后那个脚的号码，于是 A3 就是 GP29。固件开机扫成 GP_NAMES / GPS，
+   NUM_PINS 取最大脚号 + 1。这张表可能有洞（Pico 2 W 不声明 GP23/24/25），
+   所以 _pin() 对声明里没有的脚抛 board has no GP%d，而不是让它撞 AttributeError。
+2. ADC 窗口来自 platform_defs.h（ADC_BASE_PIN / NUM_ADC_CHANNELS），不是"26..28"这种写死的范围；
+   TEMP 走的也不是 AnalogIn，是 microcontroller.cpu.temperature 反推的 16 位码。
+3. UART / I2C / PWM / SPI 的合法性一律按脚号算（UART ((n+4)//8)%NUM_UARTS、I2C (n//2)%2 与
+   奇偶、PWM (n//2)%8 且 16 脚绕回、SPI 查组），不要把这些规则摊成界面里的 if 特判。
+4. 主机侧位掩码到 48 位：JS 的 1<<n 在 n>=32 会绕回， pins.ts 里统一用 2**n 与
+   Math.floor(mask/2**n)%2 读写位（48 位仍小于 Number.MAX_SAFE_INTEGER，双精度是精确的）。
 
 界面侧的分层与依赖方向见仓库 README 的"架构"一节，这里不重复。
 一条硬约束：层间依赖单向向下，workbench/ 下每个功能是一个 FunctionDef 插件，

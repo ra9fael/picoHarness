@@ -67,7 +67,7 @@ payload 第一个字节是 **kind**，标识这是哪种流：
 
 ```json
 {"evt":"ready","app":"PicoHarness","version":"0.1.16-spi",
- "cp":[10,3,1],"pins":29,
+ "cp":[10,3,1],"pins":29,"gp":[0,1,2,...,22,26,27,28],
  "caps":{"pwm":[...],"adc":[...],"i2c_pairs":[[scl,sda],...],
          "uart":{"tx":[...],"rx":[...],"pairs":[[tx,rx],...]},
          "spi":{"groups":[{"sck":[...],"mosi":[...],"miso":[...]},...],
@@ -79,7 +79,8 @@ payload 第一个字节是 **kind**，标识这是哪种流：
 | --- | --- |
 | `version` | 固件版本。界面报错时先核对这个 |
 | `cp` | CircuitPython 版本三元组 |
-| `pins` | 引脚总数，界面芯片数量以此为准 |
+| `pins` | 最大可寻址脚号 + 1（数组维度用），**不是**引脚个数 |
+| `gp` | 本板**能取到的**脚号数组（从 `board` 声明的 Pin 对象算出，号码读自声明名，只有 ADC 别名的按 `ADC_BASE+通道` 补号）；可能有洞，界面芯片池以此为准 |
 | `caps.pwm` | 能做 PWM 的脚号数组 |
 | `caps.adc` | 能做 ADC 的脚号数组，含虚拟通道 `100`（内部温度） |
 | `caps.i2c_pairs` | **有序对**数组，每对是 `[SCL, SDA]` |
@@ -87,14 +88,50 @@ payload 第一个字节是 **kind**，标识这是哪种流：
 | `caps.spi` | `groups` 每组的 `sck/mosi/miso` 脚号数组，外加 `max_buses`、`max_cs`、`baud_ceiling` |
 | `caps.usb.data` | 协议是否跑在独立的 data 口上（`boot.py` 生效即为 true） |
 
-`caps` 是**探测出来的**，不是硬编码：PWM/ADC 靠逐脚试建对象，I2C 靠穷举有序对试建，
-UART 用 RP2350 数据手册的固定引脚表。所以换板子、脚被占用，界面会自动反映真实能力。
-探测只在开机时做一次并缓存，`hello` 复用的就是这份缓存。
+### 2.0 脚号从哪来：封装 × 板级定义
 
-**`caps.spi` 是唯一的例外**：它来自固件里的静态表 `SPI_GROUPS`，而这张表是用
-`tools/spi_probe.py` 在 CircuitPython 10.3.1 / Pico 2 上**逐组合实测**出来的，
-不是照数据手册推的（两者对"哪些脚可路由"的说法并不一致）。
-开机时不做 SPI 扫描：穷举要 1600 多次构造调用、耗时按分钟算，
+有两层东西限制"这块板上有哪些脚"，界面只画穿过这两层的脚：
+
+1. **芯片封装**。pico-sdk `src/rp2350/hardware_regs/include/hardware/platform_defs.h`
+   里 `NUM_BANK0_GPIOS` 是 RP2350A（QFN-60）= 30（GP0..GP29）、RP2350B（QFN-80）= 48（GP0..GP47）。
+   同一文件把 ADC 写成 `ADC_BASE_PIN=26 / NUM_ADC_CHANNELS=5` 与 `40 / 9`，
+   即 **RP2350A 的 ADC0..ADC3 = GP26..GP29，RP2350B 的 ADC 脚 = GP40..GP47**。
+   CircuitPython `common-hal/analogio/AnalogIn.c` 就是按这个窗口判定的，超出即 `Invalid pin`。
+2. **板级定义**。CircuitPython 只把板子 `pins.c` 里**声明过**的脚交给你，而 `Pin` 对象
+   身上没有号码可读，号码只能从声明名里解析。rp2350 这几块板的声明名有三种形状：
+   `board.GP13`（普通 GPIO）、`board.GP26_A0`（同一个脚，同时是 ADC 通道 0）、
+   `board.A3`（ADC 通道 3，**名字里根本没有 GP**）。所以只有 ADC 别名的脚按
+   `ADC_BASE + 通道号` 编号，`ADC_BASE` 就是 `A0` 背后那个脚的号码——每块 rp2 板都把
+   `A0` 写成了带 GP 的名字（这里是 `board.GP26_A0`，QFN-80 上是 `GP40_A0`），
+   于是这条规则是从设备上算出来的，不需要按板子写死。真机上的结果：`dir(board)` 里
+   找不到 `GP29` 这个属性，但可寻址集合是 GP0..GP29，因为 GP29 就是 `A3` /
+   `VOLTAGE_MONITOR`，而且上板实测它样样能干：ADC3 读到 VSYS/3（raw 31815 → 1.600 V
+   → VSYS ≈ 4.80 V）、`PWMOut` 建得起来、`DigitalInOut` 能输出、
+   `busio.I2C(SCL=GP29, SDA=GP28)` 被接受、`busio.UART(TX=GP28, RX=GP29)` 建得起来。
+   表仍然有洞、仍然比封装窄：`raspberry_pi_pico2_w/pins.c` 不声明 GP23/GP24/GP25
+   （在这块板上它们是 `SMPS_MODE` / `LED` / `VBUS_SENSE`，既没有 GP 也没有 ADC 通道号，
+   所以取不到），两块树莓派板的表都不声明 GP30..GP47。
+
+固件开机时扫 `board` 得出这个集合（`gp`），之后所有能力表都是它的子集：取不到的脚
+不会出现在池里，也不会被任何 `caps` 数组给出。**换句话说，"Pico 2 W 有没有 GP30..GP47"
+这类问题的答案是：芯片有（RP2350B 封装），你的 CircuitPython 板级定义没声明，
+治具就取不到；哪天你用的构建声明了它，池子里会自动多出来，固件里没有任何写死的脚数。**
+
+洞在协议上的表现：范围检查用的是"最大脚号 + 1"这条连续的界（`0..NUM_PINS-1`），
+所以一个落在界内、但板级定义没声明的脚会通过范围检查，随后在 `_pin()` 那里报
+`ValueError: board has no GP23` 这样的错误；`gpio.cfg` 的掩码是逐脚展开的，遇到洞直接跳过、
+不报错。界面按 `caps.gp` 渲染，压根不会把这些脚端给你，所以正常操作碰不到这两条。
+
+`caps` 里 PWM / ADC / I2C 对是**探测出来的**（逐脚试建对象、按规则枚举有序对再试建），
+UART 是**按文档规则现算**的：偶发 TX、奇发 RX、实例号 `((n+4)//8) % NUM_UARTS`，
+这三条都是 CircuitPython `common-hal/busio/UART.c` 自己的算法，固件只是把它跑一遍；
+SPI 见下面。探测和计算只在开机时做一次并缓存，`hello` 复用的就是这份缓存。
+
+**SPI 是唯一的静态表**：`SPI_GROUPS` 的 GP0..GP28 行是 `tools/spi_probe.py` 在
+CircuitPython 10.3.1 / Pico 2 上逐组合实测（53 个被接受、1571 个报 `Invalid pins`），
+实测结果与 pico-sdk `hardware/gpio.h` 的 F1 列**逐行一致**；GP30..GP47 行取自同一张表
+（QFN-80 专属行），在 30 脚的板子上取不到、也就不会被送到界面上——固件发 `caps.spi` 前
+会把这张表投影到 `gp` 上。开机不做 SPI 扫描：穷举要 1600 多次构造调用、耗时按分钟算，
 而这个答案是芯片的属性，不是接线的属性，扫了也不会变。
 
 主机连接时的动作：两个 CDC 口共用同一 VID/PID，`getInfo()` 区分不了，所以给每个已授权端口
@@ -113,16 +150,36 @@ UART 用 RP2350 数据手册的固定引脚表。所以换板子、脚被占用�
 
 这几类功能的引脚**不是任意组合都行**，而且合法性是"对"的属性，不是"单脚"的属性：
 
-- **I2C（rp2 走 PIO）**：SCL 必须奇数脚、SDA 必须偶数脚，且满足 `SDA ≡ SCL-1 (mod 4)`。
-  所以 GP8/GP10（都是偶数）永远配不成总线。
-- **UART（rp2 硬件外设，非 PIO）**：只有 UART0 / UART1 两路。偶数脚能做 TX，奇数脚能做 RX，
-  全双工时两脚必须落在同一路实例上。**GP0(TX) / GP1(RX) 属于 UART0**：单口那会儿实测被
-  CircuitPython 串口控制台占用，这版双口固件上实测可以正常建总线，所以它们和其它脚一样
-  出现在 `caps.uart` 里。
+- **I2C（rp2 走硬件外设，不是 PIO）**：`common-hal/busio/I2C.c` 只认 Synopsys DW_apb_i2c
+  两路硬件 I2C（`NUM_I2CS = 2`），判定条件就是它源码里那一行：
+  `scl % 2 == 1 && sda % 2 == 0 && (scl / 2) % 2 == (sda / 2) % 2`——SCL 奇数脚、
+  SDA 偶数脚、两者落在同一路外设（等价于 `SDA ≡ SCL-1 (mod 4)`，但**不要求相邻**：
+  GP1/GP0、GP1/GP4、GP1/GP8 都是合法对）。不满足就直接 `Invalid pins`，没有 PIO/位模拟兜底。
+  所以 GP8/GP10（都是偶数）永远配不成总线。频率上限 1 MHz（同一份源码里 validate 的）。
+  这条规则也覆盖 GP29：实测 `busio.I2C(SCL=GP29, SDA=GP28)` 是被接受的（接着报的是没上拉，
+  那是接线条件不是引脚限制），`caps.i2c_pairs` 因此带着 SCL=29 的 8 个序对。
+- **UART（rp2 硬件外设，非 PIO）**：只有 UART0 / UART1 两路。规则在
+  `common-hal/busio/UART.c`：**每个偶数脚都能做 TX，每个奇数脚都能做 RX**，
+  具体用哪个功能由引脚号决定——`n % 4 == 0`（TX）或 `n % 4 == 1`（RX）用 F2
+  `GPIO_FUNC_UART`，`n % 4 == 2`（TX）或 `n % 4 == 3`（RX）用 F11 `GPIO_FUNC_UART_AUX`
+  （RP2350 才有这第二组复用）。实例号取 `((n + 4) / 8) % NUM_UARTS`，全双工时两端必须一致——
+  上板实测：`busio.UART(TX=GP28, RX=GP29)` 建得起来，`busio.UART(TX=GP28, RX=GP27)` 报
+  `Invalid pins`，因为 28 落在 UART0、27 落在 UART1。单看每个脚都没问题，`caps.uart.tx` /
+  `caps.uart.rx` 列的就是单脚能力，只有 `caps.uart.pairs` 才套用实例这条。
+  **GP0(TX) / GP1(RX) 属于 UART0**：单口那会儿实测被 CircuitPython 串口控制台占用，
+  这版双口固件上实测可以正常建总线，所以它们和其它脚一样出现在 `caps.uart` 里。
 - **SPI（rp2 硬件外设）**：`caps.spi.groups` 给出两组脚，**SCK/MOSI/MISO 必须全在同一组内**，
-  跨组时 `busio.SPI()` 直接报 `Invalid pins`。两组也正好对应两路外设，所以同时最多
-  `caps.spi.max_buses` 路总线（实测第三路报 `SPI peripheral in use`）。SCK 是必须的，
-  只给 SCK 不给数据脚时报 `Must provide MISO or MOSI pin`，缺 MOSI 或缺 MISO 的半总线则能建起来。
+  跨组时 `busio.SPI()` 直接报 `Invalid pins`。两组也正好对应两路外设（`NUM_SPIS = 2`），
+  所以同时最多 `caps.spi.max_buses` 路总线（实测第三路报 `SPI peripheral in use`）。
+  SCK 是必须的，只给 SCK 不给数据脚时报 `Must provide MISO or MOSI pin`，
+  缺 MOSI 或缺 MISO 的半总线则能建起来。完整两组（RP2350 全脚号）是：
+
+  | 外设 | SCK | MOSI(TX) | MISO(RX) |
+  | --- | --- | --- | --- |
+  | SPI0 | 2, 6, 18, 22, 34, 38 | 3, 7, 19, 23, 35, 39 | 0, 4, 16, 20, 32, 36 |
+  | SPI1 | 10, 14, 26, 30, 42, 46 | 11, 15, 27, 31, 43, 47 | 8, 12, 24, 28, 40, 44 |
+
+  30..47 是 QFN-80 专属行，30 脚的板子上不会出现（`caps.spi.groups` 已按 `gp` 投影）。
   **CS 不在这张表里**：这个端口的 `busio.SPI` 不管片选，固件用普通输出脚拉低/拉高，
   所以任何空闲 GP 都能当 CS，上限 `caps.spi.max_cs` 路。
 
@@ -145,7 +202,7 @@ UART 用 RP2350 数据手册的固定引脚表。所以换板子、脚被占用�
 | 命令 | 参数 | 返回 |
 | --- | --- | --- |
 | `ping` | 无（原样回带 `t`） | `{"pong": <t>}` |
-| `hello` | 无 | `data` = 开机 `ready` 的那份载荷（app/version/cp/pins/caps），供后接入的主机免重启取能力 |
+| `hello` | 无 | `data` = 开机 `ready` 的那份载荷（app/version/cp/pins/gp/caps），供后接入的主机免重启取能力 |
 | `echo` | 任意 | 原样回带 args，用于自检 |
 
 ### 3.2 GPIO
@@ -173,7 +230,7 @@ rp2 的分频器做不到你想要的每一个整数频率：它只能跑 125 MH
 所以回包里 `pwm.<脚>.hfreq` 给的是**slice 真实运行的频率**，`freq` 仍是你请求的值，
 界面据此把频率框标成琥珀色并写一条日志。
 
-同一 slice 的两个脚（如 GP24/GP25 = slice 6）不能各自设频率：第二个 `pwm.cfg`
+同一 slice 的两个脚（如 GP24/GP25 = slice 4，按 `(n // 2) mod 8` 算）不能各自设频率：第二个 `pwm.cfg`
 直接失败并回 `RuntimeError: Conflicting settings for shared resource`，
 固件此时会退还该脚的所有权，不会留下半占用的引脚。详见 [01 手册](../01_GUIApp_FW_Manual/README.md#43-pwm)。
 
@@ -251,7 +308,7 @@ raw = v / 3.3 * 65535
 | 1 | `busio.SPI on rp2 needs at least a MOSI or a MISO pin` | `mosi` 和 `miso` 都是 -1（SCK 单独一条线跑不起来） |
 | 2 | `mode must be 0..3 (CPOL/CPHA)` | `mode` 越界 |
 | 3 | `at most %d CS lines per bus` | `cs` 数量超过 `SPI_MAX_CS` |
-| 4 | `pin out of range` | 任一引脚号不在 0..`NUM_PINS-1` |
+| 4 | `pin out of range` | 任一引脚号不在 0..`NUM_PINS-1`（`NUM_PINS` = 最大可命名脚号 + 1，见 2.0） |
 | 5 | `one pin cannot hold two SPI roles` | 同一个脚出现在 SCK/MOSI/MISO/CS 里两次 |
 | 6 | `SPI GP%d(SCK)/GP%d(MOSI)/GP%d(MISO) is not a routable set: ...` | 三个数据脚不在同一引脚组 |
 | 7 | `GP%d already belongs to SPI bus %d — release it first` | 该脚已被另一条在跑的 SPI 总线占用 |

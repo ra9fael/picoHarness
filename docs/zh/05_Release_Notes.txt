@@ -4,13 +4,38 @@ PicoHarness 版本说明
 界面与固件要配套：旧固件收不到新命令，会回 "unknown cmd"。
 
 
+[20261013 0.1.17-gp29]
+
+Pico 2 上的 GP29 进池子了。它从不以 "GP29" 出现——板级表只把它声明成 A3 /
+VOLTAGE_MONITOR，而 CircuitPython 的 Pin 对象身上读不到号码，所以原来那条
+"名字里必须有 GPn" 的过滤器把它当成不存在。现在固件扫 board 上所有 Pin 对象、
+按身份去重：号码优先从声明名里的 GPn 读；只有 ADC 别名的脚按 ADC_BASE + 通道号补，
+ADC_BASE 就是 A0 背后那个脚的号码（这块板上 A0 声明成 board.GP26_A0，于是 A3 = 29）。
+整条规则是从设备上算出来的，没有按板子写死任何表。
+
+上板实测 GP29 全能，能力表因此变宽：caps.adc 多了 29，读上来是 VSYS/3
+（raw 31815 → 1.600 V → VSYS ≈ 4.80 V）；caps.pwm 到 30 个脚；caps.uart.rx 多了 29；
+caps.i2c_pairs 多出 SCL=29 的 8 对，实测 29/28 报的是"没有上拉"，说明序对本身合法。
+协议侧逐条走通：adc.cfg、pwm.cfg（回报 hfreq 990）、gpio.cfg 把它当输出、
+uart.cfg tx=28 rx=29 全部接受。
+
+顺带钉住两条 UART 实测：UART(TX=GP28, RX=GP27) 报 Invalid pins，不是奇偶规则错，
+而是 28 在 UART0、27 在 UART1，跨实例配不成对；单看 28 能当 TX、27 能当 RX，
+各自都建得起总线。tools/caps_audit.py 的真机半程现在把这张表与文档逐条对账，全绿；
+碰到没有 gp 字段的旧固件，它直接说"先部署新固件"，不再拿假的连续范围去比。
+
+界面与文档同步：引脚池按 caps.gp 自动多出 GP29；01/02/04 里"可寻址集合"的口径
+从"板级命名为 GPn 的脚"改成"板级声明的脚，号码读自声明名，只有 ADC 别名的按
+ADC_BASE+通道补号"，并写入上面的实测数据。
+
+
 [20261012 0.1.16-spi]
 
 加 SPI 总线。固件新增 spi.cfg / spi.release / spi.xfer 三条命令，read_state 新增
 cfg_spi 与 spi 列表，ready.caps 新增 spi 对象（groups / max_buses / max_cs / baud_ceiling）。
 
-引脚合法性来自 tools/spi_probe.py 的上板实测，不是数据手册推导——两者在"哪些脚可路由"
-上确实不一致。穷举每个有序 (SCK, partner) 组合，53 个被接受，正好落在两组里；
+引脚合法性先由 tools/spi_probe.py 上板实测，再与 pico-sdk hardware/gpio.h 的 F1 列逐行对账，
+两者一致。穷举每个有序 (SCK, partner) 组合，53 个被接受，正好落在两组里；
 1571 组配对报 Invalid pins，100 个三元组是这两组的笛卡尔积。结论写进静态表 SPI_GROUPS，
 开机不扫描（扫描要 1600+ 次构造调用，而答案是芯片属性，不会因接线而变）。
 
@@ -30,6 +55,19 @@ half_duplex= NotImplementedError），只给 SCK 会被拒（Must provide MISO o
 一次一笔原始字节事务，支持"保持片选"做分两段的事务、片选下拉选"—"表示全程不动片选。
 跨组的脚拖不进去，第三路总线在界面就被挡下。配置随其它总线一起进 localStorage，
 漂移对账把 cs 顺序、baud、mode 都算进签名。
+
+同一版里把"这块板有哪些脚"彻底按官方文档重做了一遍（不提升版本号）：
+可寻址集合 = 封装 GPIO 数 ∩ CircuitPython 板级命名，固件开机扫 board 得出并作为 ready 的新字段
+gp 上报（Pico 2 W 就有洞：没有 GP23/24/25，GP29 只以 A3/VOLTAGE_MONITOR 存在）；
+caps.pins 的含义随之改成"最大可命名脚号 + 1"，不再是引脚个数。SPI_GROUPS 是 gpio.h F1 的完整
+48 脚转录，发送前按 gp 投影，界面 / mock / 固件读到的都是同一份集合，任何写死的脚数都被拿掉。
+主机侧位掩码改成 2**n 读写（1<<n 在 n>=32 绕回），48 位仍在安全整数范围内。
+新增 tools/caps_audit.py：--static 用文档规则跑满 48 个脚号自校并解析固件里的 SPI_GROUPS 与
+UART 实例式，接上板子时再与真机 caps 对账。双语手册里 PWM slice、ADC 窗口、I2C/UART/SPI
+的合法性全部改成引 gpio.h / platform_defs.h / CP common-hal 源码的确切条件——
+I2C 走硬件 DW_apb_i2c 而非 PIO（早前版本说明里写成 PIO，那句是错的）且配对不要求相邻，
+UART 偶 TX 奇 RX、实例 ((n+4)//8)%NUM_UARTS，
+PWM 到 GP16 会绕回 slice 0（"不相邻"不等于"不同 slice"）。
 
 
 [20261012 0.1.15-pwmhz]

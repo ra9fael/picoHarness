@@ -124,9 +124,17 @@ G:\code.py is still the old version. Compare the VERSION string in the device-si
 the source and copy the file once more.
 Only one COM port appears, or ready.caps.usb.data is false — G:\boot.py was not copied, or the
 board was not hard-reset afterwards (Ctrl-D does not count).
-ready.caps.spi disagreeing with what a sweep would find — that is the static SPI_GROUPS table, and
-it does not change by itself. Re-measure with tools/spi_probe.py rather than adding a boot-time
-probe; there is deliberately no SPI sweep.
+ready.caps.spi disagreeing with what a sweep would find — that is the static SPI_GROUPS table, a full
+transcription of the F1 column of pico-sdk hardware/gpio.h (whose GP0..GP28 rows were additionally
+confirmed on the board by tools/spi_probe.py, row for row). There is deliberately no SPI sweep at boot.
+Note that the table is projected onto caps.gp before it is sent: a pin vanishing from a group usually
+means the board definition does not declare it, not that the table is wrong.
+A pin missing from the UI pool, or a pin present in a caps array but not clickable — check whether
+ready.gp exists and contains it. gp is the set of pins this board can reach, computed from the Pin
+objects board exposes; if it is absent, G:\code.py is still the old version.
+The offline cross-check is tools/caps_audit.py: --static lays the rules read from gpio.h,
+platform_defs.h and the CircuitPython sources over all 48 pin numbers and parses SPI_GROUPS and the
+UART instance formula straight out of code.py; with a board attached it also compares the live caps.
 
 [Firmware implementation notes]
 
@@ -164,8 +172,29 @@ half_duplex= raises NotImplementedError), a bare SCK is refused with "Must provi
 so speed and mode are applied afterwards with configure() while the bus is locked (without the lock
 it answers "Function requires lock"). .frequency reports the clock the divider actually reached —
 150 MHz over an even integer, 75 MHz ceiling — which is why hbaud has to travel back to the host.
-The routable (SCK, MOSI, MISO) sets live in the static SPI_GROUPS table and are not swept at boot:
-the exhaustive version is 1600+ constructor calls.
+The routable (SCK, MOSI, MISO) sets live in the static SPI_GROUPS table — the complete F1 column of
+gpio.h, with its GP0..GP28 rows confirmed on hardware by tools/spi_probe.py, while 30..47 are QFN-80
+only and are projected away through gp. They are not swept at boot: the exhaustive version is 1600+
+constructor calls.
+
+Four pin-related implementation constraints, each traceable to the official sources quoted above:
+
+1. The addressable set is package GPIOs ∩ the pins the board declares; the firmware reads it off
+   board at boot into GP_NAMES / GPS, with NUM_PINS = highest reachable number + 1. A Pin object
+   carries no readable number, so the number is parsed out of the declared name: "GPn" reads
+   directly, and a pin that only has ADC aliases (A3 / VOLTAGE_MONITOR on the Pico 2) is numbered
+   ADC_BASE + channel, ADC_BASE being the pin behind A0 — which is how A3 becomes GP29. That table
+   can have holes (a Pico 2 W declares no GP23/24/25), which is why _pin() raises
+   "board has no GP%d" instead of letting the code trip over an AttributeError.
+2. The ADC window comes from platform_defs.h (ADC_BASE_PIN / NUM_ADC_CHANNELS), not from a hardcoded
+   "26..28"; and TEMP is not an AnalogIn either — it is microcontroller.cpu.temperature inverted into
+   a 16-bit code.
+3. UART / I2C / PWM / SPI legality is computed from the pin number (UART ((n+4)//8)%NUM_UARTS, I2C
+   parity plus (n//2)%2, PWM (n//2)%8 with the wrap at GP16, SPI by group lookup). Do not spread those
+   rules into scattered if-special-cases in the UI.
+4. The host-side bitmasks go up to 48 bits: JS 1<<n wraps for n>=32, so pins.ts reads and writes bits
+   with 2**n and Math.floor(mask/2**n)%2 (a 48-bit mask stays under Number.MAX_SAFE_INTEGER, so the
+   double arithmetic is exact).
 
 The UI layering and its dependency direction are in the "Architecture" section of the repository
 README; not repeated here. One hard rule: dependencies point one way, downward. Each function under

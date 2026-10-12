@@ -122,7 +122,11 @@ To disconnect, click the same button again (its label changes to "Disconnect").
 
 The workbench is the main view, split into a top half and a bottom half:
 
-- On top, the **pin pool** lays out every GP pin on the board. Each chip shows the pin name and its capability badges.
+- On top, the **pin pool** lays out every GP pin the board can **reach**. Each chip shows the pin name and its capability badges.
+  The list comes from the device's boot-time `caps.gp` (see [02 §2.0](../02_Library_User_Guide/README.md)), so the pool may have
+  holes: on a Pico 2 W, GP23/GP24/GP25 belong to the CYW43 and that board's table does not declare them at all. GP29 is the other
+  direction — it is never spelled "GP29" on a Pico 2 (its names are `A3` / `VOLTAGE_MONITOR`), yet the firmware works out its
+  number from the ADC alias, so it is in the pool. A pin the pool does not have is a pin the UI never offers you.
 - Below it, the **lanes**, one per function: digital input, digital output, PWM, ADC, I2C, UART, SPI.
 
 Binding a pin has two forms, pick whichever you prefer:
@@ -170,17 +174,31 @@ by more than 5% also writes a line to the log. Below 1 Hz the value is not sent 
 `freq < 1 Hz: PWMOut takes whole hertz`.
 
 **One trap to know up front**: rp2 hardware PWM is grouped by slice, one counter per slice, so
-**the two pins in one slice share a single frequency**. The grouping is roughly adjacent even/odd pairs:
-GP0 and GP1 are one slice, GP2 and GP3 the next, and so on; GP24 and GP25 are slice 6. Asking the second
-pin for a different frequency fails with `RuntimeError: Conflicting settings for shared resource` — the
-firmware does not overwrite the first pin, it hands that pin back to the pool and the UI shows the command
-as failed. When you need two independent frequencies, pick non-adjacent pins (GP7 and GP11, for example).
-A given PWM channel can also be routed to a higher-numbered pin, and then the two are secretly one slice;
-when in doubt, try it — the conflict is reported as that error rather than silently mis-setting the pin.
+**the two pins in one slice share a single frequency**. The grouping is written down in the F4 column of the
+datasheet / pico-sdk `gpio.h`, not the vague "adjacent pins" rule: pin `n` lands on slice `S`, channel `A/B`, where
+- `n` ≤ 31: `S = (n // 2) mod 8`, even pin = channel A, odd pin = channel B;
+- `n` ≥ 32 (QFN-80 packages only): `S = 8 + ((n - 32) mod 8) // 2`, still even A / odd B.
+
+So GP0/GP1 are slice 0, GP2/GP3 slice 1, up to GP14/GP15 at slice 7 — and **GP16 wraps back to slice 0**:
+GP16/GP17 are slice 0 again, GP18/GP19 slice 1, GP24/GP25 slice 4, GP28/GP29 slice 6. That is exactly the
+"A given PWM channel can also be routed to a higher-numbered pin, and then the two are secretly one slice"
+case: compute it from the table instead of trying. Asking the second pin for a different frequency fails with
+`RuntimeError: Conflicting settings for shared resource` — the firmware does not overwrite the first pin, it
+hands that pin back to the pool and the UI shows the command as failed. When you need two independent
+frequencies, pick pins that compute to different slices (GP7 is slice 3, GP11 is slice 5).
 
 ### 4.4 ADC
 
 Drag a pin into the ADC lane. The chip displays the voltage directly. Click the number to cycle between V, mV, and raw.
+
+**Which pins can be ADC inputs is a package fact**: pico-sdk `platform_defs.h` and `gpio.h` both spell it out —
+**GP26..GP29 (ADC0..ADC3) on RP2350A (QFN-60, the chip in Pico 2 and Pico 2 W)**, **GP40..GP47 (ADC0..ADC7) on
+RP2350B (QFN-80)**. A pin the board definition does not declare never appears. On the Pico 2 that was measured, the
+ADC pool is GP26/GP27/GP28/GP29 plus the virtual on-die temperature channel: GP29 carries only the names `A3` /
+`VOLTAGE_MONITOR`, and the firmware derives its number from the ADC alias, so it is reachable and `adc.cfg` on it
+reads **VSYS/3** — measured raw 31815, i.e. 1.600 V on the pin and VSYS ≈ 4.80 V. Per page 8 of the Pico 2 datasheet
+that pin is used by the IP as an ADC input to measure VSYS/3, so using it for an external signal means accepting what
+it really reads. The UI lights the badge from `caps.adc`, so a different board or build needs no code change.
 
 The ADC lane also accepts a special **TEMP** chip, which sits at the end of the pin pool. It is the on-die temperature sensor.
 It displays degrees Celsius by default. It occupies no physical pin and can run at the same time as other ADC channels.
@@ -195,9 +213,14 @@ SDA slot and a pin badged S into the SCL slot.
 When a drop is refused, the UI tells you why (this pin cannot serve as SCL, or these two pins cannot form a pair). You never get
 a silent no-op.
 
-The rp2 I2C pin pairs are **not arbitrary**: SCL must be an odd pin, SDA must be an even pin, and `SDA = SCL - 1` (mod 4) must
-hold. GP5 with GP4 is legal; GP8 with GP10 can never pair. The board reports the legal combinations itself, so following the
-badges prevents misselection.
+The rp2 I2C pin pairs are **not arbitrary**: this runs on the two hardware DW_apb_i2C peripherals (not PIO), and the F3 column
+of `gpio.h` fixes the rule — **SCL must be an odd pin, SDA an even pin, and `SDA ≡ SCL - 1` (mod 4)**. GP5 with GP4 is legal, and
+so is GP13 with GP4 (the pair does not have to be adjacent, only congruent mod 4), while GP8 with GP10 can never pair: both are
+even, so neither can be SCL. The instance number is `(n // 2) mod 2`, 0 for i2c0 and 1 for i2c1, and the mod-4 condition above
+already puts SCL and SDA on the same one — which is why the pairing rule carries no separate instance test. CircuitPython builds a
+bus only on a combination that satisfies it and raises `Invalid pins` otherwise; `caps.i2c_pairs` is the ordered-pair array the
+firmware produces by enumerating exactly those candidates and building each one for real, so following the S/D badges prevents
+misselection. A clock above 1 MHz is rejected by CircuitPython itself.
 
 The card also sets the clock frequency, scans the bus (the `Scan` button lists the addresses that acknowledge on the bus), and
 runs raw transactions (fill in the slave address, the bytes to write, and the byte count to read).
@@ -216,8 +239,11 @@ On the card you pick the baud rate, type hex bytes to send, and read back a byte
 
 **One trap**:
 
-- The usable UART pins come from a fixed set, and for full duplex TX and RX must land on the same UART instance.
-  Following the T / R badges keeps you correct.
+- The pins are **fixed by the datasheet**: every even GP can be TX and every odd GP can be RX (the F2 / F11 columns of
+  `gpio.h`), but which of the two UARTs a pin routes to is also table-driven — CircuitPython computes
+  `instance = ((n + 4) // 8) mod NUM_UARTS`, and `NUM_UARTS = 2` on rp2. So for full duplex TX and RX must compute to the
+  same instance, or the constructor raises `Invalid pins`. The T / R badges are derived from that same rule, and the card
+  only refuses a pair that cannot share an instance.
 
 **GP0 and GP1 are usable now.** They are RP2350 UART0's TX/RX. In the old single-port build they measured as
 claimed by the CircuitPython console, so any use failed with `GP1 in use`; on this dual-CDC firmware the same
@@ -253,13 +279,20 @@ MOSI pin`, measured).
 
 **Two things to watch on this lane:**
 
-- The data pins must all sit in **the same group**. Measured on the board, RP2350 has exactly
-  two:
+- The data pins must all sit in **the same group**, one group per hardware SPI. RP2350 has two
+  peripherals, so two groups, and the complete table over all pin numbers is:
 
-  | Group | SCK | MOSI | MISO |
+  | Peripheral | SCK | MOSI(TX) | MISO(RX) |
   | --- | --- | --- | --- |
-  | first | 2 / 6 / 18 / 22 | 3 / 7 / 19 / 23 | 0 / 4 / 16 / 20 |
-  | second | 10 / 14 / 26 | 11 / 15 / 27 | 8 / 12 / 24 / 28 |
+  | SPI0 | 2 / 6 / 18 / 22 / **34 / 38** | 3 / 7 / 19 / 23 / **35 / 39** | 0 / 4 / 16 / 20 / **32 / 36** |
+  | SPI1 | 10 / 14 / 26 / **30 / 42 / 46** | 11 / 15 / 27 / **31 / 43 / 47** | 8 / 12 / 24 / 28 / **40 / 44** |
+
+  That is a straight transcription of the F1 column of `gpio.h`; the bold 30..47 entries only exist on
+  QFN-80 (RP2350B). Which of them you can actually use depends on whether the board definition declares the
+  pin, and the firmware projects this table onto `caps.gp` at boot, so no pin count is hardcoded. The Pico
+  2 W is the worked example: its `pins.c` does not declare GP23, so after projection
+  `caps.spi.groups[0].mosi` is down to `3 / 7 / 19` (a conclusion from the board table plus the projection
+  rule, not a measurement).
 
   Spanning the two groups is refused before anything goes to the device:
   `SCK/MOSI/MISO must come from one pin group (one hardware SPI)`.
@@ -381,19 +414,21 @@ These are traps already stepped in, collected here to save your time.
 
 | Item | Detail |
 | --- | --- |
-| PWM pins in one slice share a frequency | Changing the frequency on one pin overwrites the other. Need independent frequencies, change pins. |
+| Which pins are in the pool | package GPIO count (RP2350A 30 / RP2350B 48, per `platform_defs.h`) ∩ the pins the board's `pins.c` declares. The number comes out of the declared name: `GPn` reads directly, and a pin that only has ADC aliases (`A3`) is numbered `ADC_BASE + channel`, which is how GP29 gets into the pool on a Pico 2. The pool may have holes (a Pico 2 W declares no GP23/24/25); firmware and UI both follow `caps.gp`, no pin count is hardcoded. |
+| PWM pins in one slice share a frequency | Changing the frequency on one pin overwrites the other. Need independent frequencies, change pins. Slice = `(n // 2) mod 8` for n ≤ 31 and `8 + ((n - 32) mod 8) // 2` for n ≥ 32, even A / odd B — **it wraps at GP16 back to slice 0**, so "not adjacent" is not the same as "not the same slice". |
 | PWM frequency floor | Integer Hz only, and the measured floor is 9 Hz (1..8 Hz all run at 9). Below 1 Hz the board rejects the command; for 1..8 the firmware reports the real frequency and the UI marks the field amber plus logs it. |
+| ADC pins depend on package | QFN-60 is GP26..GP29 (ADC0..3), QFN-80 is GP40..GP47 (ADC0..7). On the Pico 2 the IP already uses GP29 as the VSYS/3 monitor — it is in the pool under its `A3` name, and reading it gives you the board supply divided by 3. |
 | I2C needs pull-ups | If neither line is held high at idle you get `No pull up found`. That is a wiring problem, not a software problem. |
-| I2C pin pairs are fixed | SCL odd, SDA even, `SDA = SCL-1 (mod 4)`. Follow the S/D badges. |
+| I2C pin pairs are fixed | Hardware DW_apb_i2C, two instances: SCL odd, SDA even, `SDA ≡ SCL-1 (mod 4)` — adjacency is not required, and a pair that fails this raises `Invalid pins`. Follow the S/D badges. |
 | UART on GP0/GP1 | Measured as claimed by the CircuitPython console in the old single-port build; on 0.1.14 with dual CDC they build a UART0 bus normally, and the capability table offers them. |
-| UART pins are fixed | Only certain pins can be TX or RX, and for full duplex both pins must be on the same UART. |
-| SPI data pins come in two groups | SCK/MOSI/MISO must all be from one group (the table in 4.8); spanning the groups builds nothing, and two groups means two buses. |
+| UART pins are fixed | Every even pin can be TX, every odd pin can be RX; instance = `((n + 4) // 8) mod 2`, and for full duplex both pins must be on the same UART. |
+| SPI data pins come in two groups | SCK/MOSI/MISO must all be from one group (the table in 4.8, a full transcription of `gpio.h` F1); spanning the groups builds nothing, and two groups means two buses. The 30..47 rows are QFN-80 only and are projected away through `caps.gp`. |
 | SPI clocks round down | The clock is 150 MHz divided by an even integer, ceiling 75 MHz. Measured: asking for 2 MHz runs at 1973684 Hz, 10 MHz at 9375000 Hz, and the result line says `actual {0} Hz`. |
 | SPI chip select is plain IO | The firmware drives CS as an output pin, so it uses no hardware SPI resource — but it does occupy a GP. |
 | Copying code.py reboots the board | The browser's serial connection drops, so you have to reconnect. |
 | Changing boot.py needs a hard reset | Press RESET or replug. A Ctrl-D soft reboot does not re-run boot.py, so the board still shows one port. |
 | The two COM ports are indistinguishable by name | They share one VID/PID, so the page identifies them with a nonce ping. When debugging by hand, send `{"cmd":"ping"}` and see which port answers. |
-| Swapping boards | The capability table is probed, so the UI adapts on its own. No code changes needed. |
+| Swapping boards | The PWM / ADC / I2C tables are probed at boot and SPI is the documentation table projected onto `caps.gp`, so the UI adapts on its own. No code changes needed. |
 
 ---
 
