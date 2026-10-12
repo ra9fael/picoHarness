@@ -143,6 +143,7 @@ main { padding: 16px; }
   font: 11px var(--mono);
   padding: 1px 4px;
 }
+.chip .pwm-in.hwdev { color: var(--warn); border-color: var(--warn); }
 .chip .pwm-sel {
   width: 62px;
   background: #10161b;

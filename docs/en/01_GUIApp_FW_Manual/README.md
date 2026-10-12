@@ -162,13 +162,21 @@ dropdown on the right (mHz / Hz / kHz / MHz). So "50kHz" costs two clicks: 50, t
 
 Duty cycle is a number between 0 and 1.
 
+**The frequency you type is not always the frequency you get.** rp2 hardware PWM can only generate
+125 MHz/(div×(top+1)); the measured floor is 9 Hz, so 1, 5 or 8 Hz all run at 9 Hz, and higher requests
+quantize too (1000→990, 2000→2035). The firmware reports the frequency the slice really runs at, the UI
+turns that field amber, the tooltip reads "set to X Hz, the hardware runs Y Hz", and a request that misses
+by more than 5% also writes a line to the log. Below 1 Hz the value is not sent at all; the board answers
+`freq < 1 Hz: PWMOut takes whole hertz`.
+
 **One trap to know up front**: rp2 hardware PWM is grouped by slice, one counter per slice, so
 **the two pins in one slice share a single frequency**. The grouping is roughly adjacent even/odd pairs:
-GP0 and GP1 are one slice, GP2 and GP3 the next, and so on. Set GP0 to 1kHz, then set GP1 to 500Hz, and
-GP0's frequency follows to 500Hz. This is not a bug; the hardware is built that way. When you need two
-independent frequencies, pick non-adjacent pins (GP7 and GP11, for example). A given PWM channel can also
-be routed to a higher-numbered pin, and then the two are secretly one slice, so when in doubt, measure
-whether the frequencies overwrite each other.
+GP0 and GP1 are one slice, GP2 and GP3 the next, and so on; GP24 and GP25 are slice 6. Asking the second
+pin for a different frequency fails with `RuntimeError: Conflicting settings for shared resource` — the
+firmware does not overwrite the first pin, it hands that pin back to the pool and the UI shows the command
+as failed. When you need two independent frequencies, pick non-adjacent pins (GP7 and GP11, for example).
+A given PWM channel can also be routed to a higher-numbered pin, and then the two are secretly one slice;
+when in doubt, try it — the conflict is reported as that error rather than silently mis-setting the pin.
 
 ### 4.4 ADC
 
@@ -331,7 +339,7 @@ These are traps already stepped in, collected here to save your time.
 | Item | Detail |
 | --- | --- |
 | PWM pins in one slice share a frequency | Changing the frequency on one pin overwrites the other. Need independent frequencies, change pins. |
-| PWM frequency floor | The hardware accepts integer Hz only, with a real floor around 7.4Hz. The page lets smaller values through, and the board reports the error as it is. |
+| PWM frequency floor | Integer Hz only, and the measured floor is 9 Hz (1..8 Hz all run at 9). Below 1 Hz the board rejects the command; for 1..8 the firmware reports the real frequency and the UI marks the field amber plus logs it. |
 | I2C needs pull-ups | If neither line is held high at idle you get `No pull up found`. That is a wiring problem, not a software problem. |
 | I2C pin pairs are fixed | SCL odd, SDA even, `SDA = SCL-1 (mod 4)`. Follow the S/D badges. |
 | UART on GP0/GP1 | Measured as claimed by the CircuitPython console in the old single-port build; on 0.1.14 with dual CDC they build a UART0 bus normally, and the capability table offers them. |

@@ -100,10 +100,14 @@ GP7 ── 330Ω ── LED anode, LED cathode ── GND
 **Two traps you will certainly hit**:
 
 - **The two pins of one slice are tied to the same frequency.** An rp2 PWM slice has one counter shared by two pins,
-  so the frequency you set later overwrites the earlier one. To run two different frequencies, pick pins that are not paired
-  (GP7 and GP11 are in different slices), or accept the shared frequency and vary only duty.
-- **There is a low-frequency floor.** Fixed-frequency mode on the rp2 accepts integer Hz only, with a real floor around 7.4 Hz.
-  Enter 1 mHz and the UI lets it through while the device reports the error as it is. That is honest reporting, not a bug.
+  so they can only run one frequency. To run two different frequencies, pick pins that are not paired
+  (GP7 and GP11 are in different slices), or accept the shared frequency and vary only duty. Asking the second pin for
+  another frequency does not overwrite the first: `pwm.cfg` fails with `Conflicting settings for shared resource` and
+  that pin goes back to the pool.
+- **There is a low-frequency floor.** Fixed-frequency mode on the rp2 accepts integer Hz only, and the measured floor
+  is 9 Hz: 1..8 Hz all run at 9 Hz, and higher requests quantize (1 kHz comes out as 990 Hz). The firmware reports the
+  real frequency, so the field turns amber and its tooltip says what the hardware runs; a value below 1 Hz is rejected
+  by the device outright. That is honest reporting, not a bug.
 
 **Want to capture the waveform**: bring the PWM pin over to the neighbouring GP26 with a jumper wire, and the ADC plus the scope will show your own square wave.
 The ADC stream is at best one batch every 10 ms, so a high-frequency square wave is severely distorted. Use it for slow duty-cycle changes only.

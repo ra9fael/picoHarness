@@ -24,6 +24,7 @@
       pending: [],
       ctrl: null,
       rx: "",
+      pw: {}, // slot -> {freq, hfreq, duty}, mirroring firmware read_state().pwm
       getInfo: function () {
         return { usbVendorId: 0x2e8a, usbProductId: 0x000b };
       },
@@ -79,15 +80,38 @@
         if (!m || !m.cmd) return;
         if (m.cmd === "ping") return p.send({ id: m.id, ok: true, data: { pong: m.args.t } });
         if (m.cmd === "hello")
-          return p.send({ id: m.id, ok: true, data: { version: "0.1.14-mock", caps: CAPS } });
+          return p.send({ id: m.id, ok: true, data: { version: "0.1.15-mock", caps: CAPS } });
         if (m.cmd === "echo")
           return p.send({ id: m.id, ok: true, data: { msg: m.args.msg } });
-        if (m.cmd === "gpio.state")
+        if (m.cmd === "gpio.state") {
+          var mask = 0;
+          Object.keys(p.pw).forEach(function (k) {
+            mask |= 1 << Number(k);
+          });
           return p.send({
             id: m.id,
             ok: true,
-            data: { cfg_in: 0, cfg_out: 0, out: 0, dev_in: 0, cfg_pwm: 0, cfg_adc: 0, cfg_i2c: 0, cfg_uart: 0 },
+            data: {
+              cfg_in: 0, cfg_out: 0, out: 0, dev_in: 0,
+              cfg_pwm: mask, cfg_adc: 0, cfg_i2c: 0, cfg_uart: 0,
+              pwm: p.pw,
+            },
           });
+        }
+        // rp2 fixed-frequency PWMOut: whole hertz only, and the divider cannot
+        // go below 9 Hz (measured on GP25/GP2/GP12/GP0, CircuitPython 10.3.1),
+        // so hfreq is what the slice really generates.
+        if (m.cmd === "pwm.cfg") {
+          if (m.args.freq < 1)
+            return p.send({ id: m.id, ok: false, error: "freq < 1 Hz: PWMOut takes whole hertz" });
+          var req = Math.floor(m.args.freq);
+          p.pw[String(m.args.pin)] = { freq: req, hfreq: req < 9 ? 9 : req, duty: m.args.duty };
+          return p.send({ id: m.id, ok: true, data: { pwm: p.pw } });
+        }
+        if (m.cmd === "pwm.stop") {
+          delete p.pw[String(m.args.pin)];
+          return p.send({ id: m.id, ok: true, data: { pwm: p.pw } });
+        }
         p.send({ id: m.id, ok: false, error: "unknown cmd: " + m.cmd });
       },
     };

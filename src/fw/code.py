@@ -65,7 +65,7 @@ if DATA is not None:
     DATA.timeout = 0  # read() returns immediately instead of waiting for bytes
 
 APP = "PicoHarness"
-VERSION = "0.1.14-uart01"
+VERSION = "0.1.15-pwmhz"
 NUM_PINS = 29  # GP0..GP28: Pico-family boards expose up to GP28; on rp2040 GP27/28 are ADC1/ADC2
 
 # Virtual ADC channel id for the on-die temperature sensor. It is not a GP pin,
@@ -246,7 +246,7 @@ def set_out(mask, vals):
 
 # —— PWM driver ——
 pwm_obj = [None] * NUM_PINS
-pwm_par = [None] * NUM_PINS  # (freq, duty 0..1) for reporting
+pwm_par = [None] * NUM_PINS  # (requested freq, hardware freq, duty 0..1) for reporting
 
 
 def pwm_release(n):
@@ -265,7 +265,7 @@ def pwm_start(pin, freq, duty):
     duty = max(0.0, min(1.0, float(duty)))
     freq = float(freq)
     if freq < 1:
-        raise ValueError("freq < 1 Hz: PWMOut takes whole hertz (rp2 floor ~7.4 Hz)")
+        raise ValueError("freq < 1 Hz: PWMOut takes whole hertz")
     freq = int(freq)
     dc = int(duty * 65535)
     if pwm_obj[n] and pwm_par[n] and pwm_par[n][0] == freq:
@@ -276,8 +276,21 @@ def pwm_start(pin, freq, duty):
         # tearing the object down and rebuilding it.
         if pwm_obj[n]:
             pwm_obj[n].deinit()
-        pwm_obj[n] = PWMOut(_pin(n), frequency=freq, duty_cycle=dc)
-    pwm_par[n] = (freq, duty)
+            pwm_obj[n] = None
+        try:
+            obj = PWMOut(_pin(n), frequency=freq, duty_cycle=dc)
+        except Exception:
+            # GP24/GP25 (and every other slice pair) raise "Conflicting settings
+            # for shared resource" when the partner already runs another
+            # frequency. Drop the claim on the way out: an owner of "pwm" with
+            # no object behind it makes read_state crash and blinds the UI.
+            release(n)
+            raise
+        pwm_obj[n] = obj
+    # The getter answers with the frequency the slice really runs at, and the
+    # rp2 divider cannot follow every request: 1..8 Hz all land on 9 Hz and
+    # 1000 Hz lands on 990 (CircuitPython 10.3.1, measured on GP25/GP2/GP12/GP0).
+    pwm_par[n] = (freq, int(pwm_obj[n].frequency), duty)
 
 
 def pwm_stop(pin):
@@ -832,7 +845,11 @@ def read_state():
     for n in range(NUM_PINS):
         if owner[n] == "pwm":
             pwm_m |= 1 << n
-            pw[str(n)] = {"freq": pwm_par[n][0], "duty": pwm_par[n][1]}
+            pw[str(n)] = {
+                "freq": pwm_par[n][0],
+                "hfreq": pwm_par[n][1],
+                "duty": pwm_par[n][2],
+            }
         elif owner[n] == "adc":
             adc_m |= 1 << n
     i2c_m = 0

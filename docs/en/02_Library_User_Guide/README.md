@@ -2,7 +2,7 @@
 
 This is a quick reference, not a tutorial. If you want to know how to use the harness, read the [01 User Manual](../01_GUIApp_FW_Manual/README.md) first.
 
-Every external interface of firmware version 0.1.14-uart01.
+Every external interface of firmware version 0.1.15-pwmhz.
 
 ---
 
@@ -57,7 +57,7 @@ The host does **byte-level demultiplexing of the mixed stream**: it scans for th
 The device sends one event on startup:
 
 ```json
-{"evt":"ready","app":"PicoHarness","version":"0.1.14-uart01",
+{"evt":"ready","app":"PicoHarness","version":"0.1.15-pwmhz",
  "cp":[10,3,1],"pins":29,
  "caps":{"pwm":[...],"adc":[...],"i2c_pairs":[[scl,sda],...],
          "uart":{"tx":[...],"rx":[...],"pairs":[[tx,rx],...]},
@@ -121,12 +121,14 @@ A mask bit is `1 << pin number`. The pulls are tri-state: a bit set in `pd` is p
 
 | command | arguments | notes |
 | --- | --- | --- |
-| `pwm.cfg` | `pin`, `freq`(default 1000), `duty`(default 0.5) | Start or re-parameterize. `freq` is in Hz and takes integer values only, with a physical floor of about 7.4; `duty` takes 0..1 |
+| `pwm.cfg` | `pin`, `freq`(default 1000), `duty`(default 0.5) | Start or re-parameterize. `freq` is in Hz and takes integer values only; below 1 it is rejected outright. `duty` takes 0..1 |
 | `pwm.stop` | `pin` | Stop and release the pin |
 
 When the frequency changes, the firmware `deinit`s the object and rebuilds it. On rp2, writing `.frequency` directly raises `Invalid variable_frequency`, so this works around a defect in the hardware library.
 
-Two pins in the same slice share one frequency and overwrite each other; see [01 User Manual](../01_GUIApp_FW_Manual/README.md#43-pwm).
+The rp2 divider cannot honour every integer you ask for: it only generates 125 MHz/(div×(top+1)), so the measured floor is 9 Hz (1..8 Hz all land on 9) and higher requests quantize (1000→990, 2000→2035). The reply therefore carries `pwm.<pin>.hfreq` = the frequency the slice really runs at, next to `freq` = what you requested; the UI turns the box amber and writes one log line when they differ.
+
+Two pins of one slice (GP24/GP25 = slice 6) cannot hold separate frequencies: the second `pwm.cfg` fails with `RuntimeError: Conflicting settings for shared resource`, and the firmware hands the pin's ownership back instead of leaving it half-claimed. See [01 User Manual](../01_GUIApp_FW_Manual/README.md#43-pwm).
 
 ### 3.4 ADC
 
@@ -213,7 +215,7 @@ What `gpio.state` returns, and the `data` of most other commands.
 | `cfg_pd` | bit mask | Input pins with pull-down enabled |
 | `cfg_pn` | bit mask | Input pins set to no pull |
 | `cfg_pwm` | bit mask | Pins held by PWM |
-| `pwm` | object | `{"<pin>": {"freq": f, "duty": d}}` |
+| `pwm` | object | `{"<pin>": {"freq": f, "hfreq": h, "duty": d}}` — `hfreq` is what the slice actually generates |
 | `cfg_adc` | bit mask | Pins held by ADC, **physical** pins only (the virtual temperature channel is excluded) |
 | `adc_temp` | bool | Whether the temperature channel is enabled |
 | `cfg_i2c` | bit mask | Pins held by I2C |

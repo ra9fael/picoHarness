@@ -5,6 +5,27 @@ repository commit. UI and firmware must be used as a matched pair: an old firmwa
 recognise new commands and answers "unknown cmd".
 
 
+[20261012 0.1.15-pwmhz]
+
+The firmware now tells the truth about PWM frequency. The rp2 divider can only generate
+125 MHz/(div×(top+1)), so the measured floor is 9 Hz: requests of 1..8 Hz all run at 9, and higher
+requests quantize (1000→990, 2000→2035). read_state's pwm entries gained hfreq (what the slice
+actually runs at) alongside freq (what you asked for). The UI paints the frequency field amber with a
+tooltip, and writes a log line when the gap exceeds 5%. Below 1 Hz the firmware still refuses, since
+PWMOut takes whole hertz.
+
+Also fixed a blinding side effect: when pwm.cfg failed to build the object (a second pin of a busy
+slice answers RuntimeError: Conflicting settings for shared resource) the pin stayed claimed as "pwm"
+with no object behind it, so read_state raised TypeError and every later gpio.state was unusable. The
+failure path now gives the pin's ownership back.
+
+UI fix: clicking a pin and then a lane used to work only on the I2C/UART card slots. The four per-pin
+lanes wired dragover/drop alone, so clicking a lane that was glowing for the selection did nothing —
+while the selection hint literally says "click a highlighted lane to bind". Click and drop now share
+one assign path, and clicking the pin pool un-binds the selected pin too. The duplicated prefix in
+hints ("GPGP4") is gone: pinLabel already carries GP, and the strings hardcoded another one.
+
+
 [20261012 0.1.14-uart01]
 
 probe_uart no longer drops GP0/GP1 from the candidate list. In the single-port era that UART0

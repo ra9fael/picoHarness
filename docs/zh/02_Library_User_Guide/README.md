@@ -2,7 +2,7 @@
 
 这篇是速查手册，不是教程。想知道怎么用先看 [01 使用手册](../01_GUIApp_FW_Manual/README.md)。
 
-固件版本 0.1.14-uart01 的全部对外接口。
+固件版本 0.1.15-pwmhz 的全部对外接口。
 
 ---
 
@@ -66,7 +66,7 @@ payload 第一个字节是 **kind**，标识这是哪种流：
 设备启动时主动发一条事件：
 
 ```json
-{"evt":"ready","app":"PicoHarness","version":"0.1.14-uart01",
+{"evt":"ready","app":"PicoHarness","version":"0.1.15-pwmhz",
  "cp":[10,3,1],"pins":29,
  "caps":{"pwm":[...],"adc":[...],"i2c_pairs":[[scl,sda],...],
          "uart":{"tx":[...],"rx":[...],"pairs":[[tx,rx],...]},
@@ -146,13 +146,20 @@ UART 用 RP2350 数据手册的固定引脚表。所以换板子、脚被占用�
 
 | 命令 | 参数 | 说明 |
 | --- | --- | --- |
-| `pwm.cfg` | `pin`, `freq`(默认 1000), `duty`(默认 0.5) | 启动或改参。`freq` 单位 Hz，只接受整数值，物理下限约 7.4；`duty` 取 0..1 |
+| `pwm.cfg` | `pin`, `freq`(默认 1000), `duty`(默认 0.5) | 启动或改参。`freq` 单位 Hz，只接受整数值，低于 1 直接报错；`duty` 取 0..1 |
 | `pwm.stop` | `pin` | 停掉并释放该脚 |
 
 改频率时固件会 `deinit` 后重建对象——rp2 上直接写 `.frequency` 会抛
 `Invalid variable_frequency`，这是绕开硬件库缺陷的做法。
 
-同一 slice 的两个脚共用频率，互相覆盖，见 [01 手册](../01_GUIApp_FW_Manual/README.md#43-pwm)。
+rp2 的分频器做不到你想要的每一个整数频率：它只能跑 125 MHz/(div×(top+1))，
+实测下限 9 Hz（1..8 Hz 全部落到 9），高频也会量化（1000→990、2000→2035）。
+所以回包里 `pwm.<脚>.hfreq` 给的是**slice 真实运行的频率**，`freq` 仍是你请求的值，
+界面据此把频率框标成琥珀色并写一条日志。
+
+同一 slice 的两个脚（如 GP24/GP25 = slice 6）不能各自设频率：第二个 `pwm.cfg`
+直接失败并回 `RuntimeError: Conflicting settings for shared resource`，
+固件此时会退还该脚的所有权，不会留下半占用的引脚。详见 [01 手册](../01_GUIApp_FW_Manual/README.md#43-pwm)。
 
 ### 3.4 ADC
 
@@ -247,7 +254,7 @@ MQTT 风格的开关，用来控制设备主动推什么。
 | `cfg_pd` | 位掩码 | 启用下拉的输入脚 |
 | `cfg_pn` | 位掩码 | 设为无拉制的输入脚 |
 | `cfg_pwm` | 位掩码 | 被 PWM 占用的脚 |
-| `pwm` | 对象 | `{"<脚号>": {"freq": f, "duty": d}}` |
+| `pwm` | 对象 | `{"<脚号>": {"freq": f, "hfreq": h, "duty": d}}`，`hfreq` 是 slice 实际运行频率 |
 | `cfg_adc` | 位掩码 | 被 ADC 占用的**物理**脚（不含虚拟温度通道） |
 | `adc_temp` | 布尔 | 温度通道是否启用 |
 | `cfg_i2c` | 位掩码 | 被 I2C 占用的脚 |

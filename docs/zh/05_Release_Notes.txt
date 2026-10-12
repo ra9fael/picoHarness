@@ -4,6 +4,23 @@ PicoHarness 版本说明
 界面与固件要配套：旧固件收不到新命令，会回 "unknown cmd"。
 
 
+[20261012 0.1.15-pwmhz]
+
+固件把 PWM 的真实频率说出来。rp2 的分频器只能生成 125 MHz/(div×(top+1))，实测下限 9 Hz：
+请求 1..8 Hz 全部跑 9，高频也量化（1000→990、2000→2035）。read_state 的 pwm 条目新增
+hfreq（slice 实际频率），freq 仍是你请求的值。界面上频率框随之描成琥珀色并给出 tooltip，
+偏差超过 5% 时再往日志写一条。低于 1 Hz 照旧由固件拒绝（PWMOut 只吃整数）。
+
+顺带修掉一个会致盲的坑：pwm.cfg 建对象失败时（同 slice 要第二个频率会回
+RuntimeError: Conflicting settings for shared resource）引脚已 claim 成 pwm 却没有对象，
+read_state 因此抛 TypeError，之后整个 gpio.state 都不可用。现在失败路径退还所有权。
+
+界面修复：点芯片再点泳道从前只对 I2C/UART 的卡槽有效，四条 per-pin 泳道只挂了
+dragover/drop，点亮着的泳道毫无反应——而选中提示的文案正是"点击高亮泳道绑定"。
+现在 click 与 drop 走同一个 assign 路径，点引脚池也能解绑选中脚。附带修掉提示里
+"GPGP4" 这种重复前缀（pinLabel 已含 GP，文案又写死了一个）。
+
+
 [20261012 0.1.14-uart01]
 
 probe_uart 不再把 GP0/GP1 从候选里剔除：单口形态时这对 UART0 TX/RX 被 CircuitPython
