@@ -36,8 +36,8 @@ Verified on Raspberry Pi Pico 2 (rp2350a), CircuitPython 10.3.1, desktop Chrome 
 
 Digital input / output, PWM, ADC (including the on-die temperature as a virtual channel), raw I2C bus
 transactions, UART with live terminal tabs (hex or text rendering), a scope panel for the ADC waveform
-stream, and a debug console (raw serial monitor plus REPL passthrough, on their own console port so the
-protocol link survives the REPL). The UI is bilingual, flat, and
+stream, and a debug console (raw serial monitor plus REPL passthrough, on the separate console port,
+so a REPL session costs no port re-picking even though entering the REPL stops code.py). The UI is bilingual, flat, and
 corner-free.
 
 ### 3. Quick start
@@ -110,9 +110,10 @@ Done: Web Serial handshake loop, IO-assignment workbench (pin pool + lanes, drag
 displacement, instant dispatch), GPIO / PWM / ADC lanes, batched ADC waveform stream plus scope,
 on-die temperature virtual channel, MQTT-style event subscriptions, binary-frame kind registry,
 I2C bus lane with raw transactions and legal-pair probing, UART bus lane with live console terminal
-tabs, debug console (monitor / REPL / copy and export), browser-side configuration persistence,
-bilingual UI, dual CDC (protocol on its own port, auto port identification, REPL without dropping
-the link).
+tabs, debug console (monitor / REPL / copy and export), browser-side configuration persistence with an
+export/import/clear menu, bilingual UI, dual CDC (protocol on its own port, parallel nonce-ping port
+identification with cached roles shown in the status bar and an auto-attached log port, REPL without
+re-picking ports).
 
 Next: SPI bus lane (must support CS), device-side `config.json` restore on boot, standalone error panel.
 
@@ -131,8 +132,9 @@ Next: SPI bus lane (must support CS), device-side `config.json` restore on boot,
 ### 2. 功能
 
 数字输入 / 输出、PWM、ADC（含片内温度虚拟通道）、I2C 原始总线事务、UART（带实时终端标签，可切 HEX/文本）、
-ADC 波形的示波器面板、调试控制台（原始串口监听 + REPL 直通，两者都走独立的控制台口，
-进 REPL 不断协议）。界面中英双语、扁平化、无圆角。
+ADC 波形的示波器面板、调试控制台（原始串口监听 + REPL 直通，日志走独立的控制台口，
+进 REPL 不用重选端口；但 REPL 是靠 Ctrl+C 停掉 code.py 的，这段时间协议没人应答）。
+界面中英双语、扁平化、无圆角。
 
 ### 3. 快速上手
 
@@ -199,7 +201,8 @@ uv venv -p 3.12 --seed -n .venv
 已完成：Web Serial 握手闭环、IO 分配工作台（引脚池 + 泳道、拖拽绑定、自动顶位、即时下发）、
 GPIO / PWM / ADC 泳道、ADC 批量波形流 + 示波器、片内温度虚拟通道、MQTT 式事件订阅、
 二进制帧 kind 注册表、I2C 总线泳道（原始事务 + 合法序对探测）、UART 总线泳道 + 控制台实时终端标签、
-调试控制台（监听 / REPL / 复制导出）、配置持久化（浏览器 localStorage）、中英双语界面、
-双 CDC（协议独占数据口、自动认口、进 REPL 不断链）。
+调试控制台（监听 / REPL / 复制导出）、配置持久化（浏览器 localStorage）+ 导出/导入/清空菜单、
+中英双语界面、双 CDC（协议独占数据口、并行 nonce ping 认口 + 角色缓存显示在状态栏、
+自动挂日志口、进 REPL 不用重选端口）。
 
 下一步：SPI 总线泳道（需支持 CS）、设备端 `config.json` 上电自恢复、独立错误面板。

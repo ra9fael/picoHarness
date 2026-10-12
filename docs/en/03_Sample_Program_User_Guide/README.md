@@ -182,7 +182,8 @@ With TX only you can send but cannot receive; with RX only you can receive but c
 
 **Why GP0/GP1 are out**: on the Pico 2 they are the rp2350 UART0 TX/RX, and CircuitPython's own serial console claims both of them at boot.
 The firmware already removes GP0/GP1 from `caps.uart` while probing, so the pin pool never highlights them as UART candidates.
-If your localStorage still holds an old GP0/GP1 binding saved before the upgrade, clear it and rebind once.
+If your localStorage still holds an old GP0/GP1 binding saved before the upgrade, clear it and rebind once
+(**Config ▾ → Clear config**, or just connect and let the handshake drop bindings this firmware cannot serve).
 
 ---
 

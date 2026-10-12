@@ -79,26 +79,40 @@ Take `dist/index.html` (see [04 Build Guide](../04_FW_Build_Guide.txt) for how t
 by double-clicking. It works straight from `file://`; you do not need a local server.
 
 Click **Connect** at the top of the page. Both CDC ports share one vendor/product ID, so the browser cannot name them and
-the page identifies them by asking: it pings each authorized port and keeps the one that echoes back its nonce — that is the
-data port.
+the page identifies them by asking: it pings **every** authorized port at once and keeps the one that echoes back its nonce —
+that is the data port. Verdicts are cached for 4 seconds, so reconnecting is near-instant.
 
 - First time: the browser opens a port picker. Select **every** entry of the board (usually shown as
   `USB Serial Device`, or as entries carrying the `2E8A` vendor ID — a dual-CDC board lists two), so the page is authorized
   for both and the picker never appears again.
 - Later visits: reconnection costs zero clicks, the ports are already authorized.
-- If the device program is not running (stopped at the REPL, or crashed): the page sends `Ctrl+C` + `Ctrl+D` on the other
-  port to kick it back to life, then looks for the protocol port again.
+- If the device program is not running (stopped at the REPL, or crashed): the page sends `Ctrl+C` + `Ctrl+D` on the port
+  that actually showed device traffic during the probe — the data port ignores control bytes, which is why the candidate is
+  picked by who made noise — then looks for the protocol port again. It does **not** open a second picker: authorized ports
+  that stay silent only mean `code.py` is not running.
 
 The handshake reads the board's capability table with the `hello` command, so the device program does not have to restart.
 
 After a successful connection:
 
-- The status light at the top turns green and displays the firmware version.
+- The status light turns green, reading e.g. `Connected · dual CDC · log port ✓`. The middle segment tells you whether the
+  board really is dual-CDC or `single port (legacy)`; the last is the log port, and `log port not attached` means one click
+  on **Attach log port** is left to do. On a dual-CDC board the page attaches the log port by itself right after the
+  handshake, so normally you touch nothing.
 - The console below prints the handshake.
 - The pin chips on the workbench gain capability badges (P = PWM, A = ADC, S/D = I2C, T/R = UART).
 
 Those badges come **from the board itself**; they are not hardcoded in the page. Swap in another board, or let some other owner
 claim a pin, and the UI reflects it truthfully. You never get a pin that looks usable but is not.
+
+A board with a single CDC port (no `boot.py`, or one that never got a hard reset) shows `Connected · single port (legacy)`
+plus a standing banner at the top of the page:
+
+> Legacy mode: this board exposes one CDC port, so the device's print() output shares it with the protocol. Put boot.py on CIRCUITPY and press RESET (hard reset) to split it in two; single-port mode is not supported in the next release.
+
+Single-port still works in this release — protocol and `print` squeeze through one port, and the log-port button stays
+disabled with "A single-port board has no separate console port; install boot.py and press RESET (hard reset) to get one" —
+but do not build on that shape: the next release is dual-port only.
 
 To disconnect, click the same button again (its label changes to "Disconnect").
 
@@ -260,14 +274,22 @@ The bottom of the page holds the console, in two modes:
   banner, `print` and tracebacks live, and the protocol chatter stops scrolling past your eyes.
 - **REPL**: writable, your keystrokes pass straight through to the board's CircuitPython prompt. Use it to try a snippet on the spot.
 
-The **Attach log port** button opens that console port, on demand, once: the page probes the authorized ports and takes the one
-that never answers a protocol ping. Afterwards the button greys out and reads "Log port attached"; it can only be re-picked after
-disconnecting the device.
+The **Attach log port** button opens that console port. On a dual-CDC board the page attaches it by itself right after the
+handshake (it probes the authorized ports and takes the one that never answers a protocol ping), so you normally never press it;
+you only do when the second port was never authorized, which the status light shows as `log port not attached`. Afterwards the
+button greys out and reads "Log port attached"; it can only be re-picked after disconnecting the device.
+
+The **Raw stream** button is a switch: with it on, the protocol port's raw JSON/binary bytes are written into the terminal too.
+Off by default — the UI already decodes those bytes, and turning it on only interleaves them with the log port's output.
+Switch it on when you want to read the wire format itself.
 
 A button switches modes. When you switch to REPL, any open UART tab yields to Console automatically, because the board's REPL
-lives on the console port and one port allows only one owner. With dual CDC the REPL touches only that port: the data port stays
-open, so leaving the REPL needs no port picker and no reconnect. Switching back to Monitor restarts the device program and
-re-runs the handshake (the board's volatile configuration is cleared; the page immediately re-applies it).
+lives on the console port and one port allows only one owner. Be clear about what dual CDC actually saves you: the REPL touches
+only that port, so the **data port's connection is never dropped** — leaving the REPL costs no port picker and no re-authorization.
+But entering the REPL means `Ctrl+C`, which stops `code.py`, so during a REPL session **nothing answers the protocol** and every
+lane is dead (see section 9 of the [sample program guide](../03_Sample_Program_User_Guide/README.md)). Switching back to Monitor
+restarts the device program and re-runs the handshake (the board's volatile configuration is cleared; the page immediately
+re-applies it).
 
 Three action buttons: clear, copy all, export as a txt file.
 
@@ -278,7 +300,22 @@ Three action buttons: clear, copy all, export as a txt file.
 - The **EN / 中文** buttons in the top right switch language, and the choice is remembered.
 - Your bound pins, frequencies, bus configurations, and scope channel selection all live in `localStorage`.
   Close the page and open it again and they come back; once the board connects, they are sent down to it.
-- To wipe everything, run `localStorage.clear()` in the browser console and refresh.
+- The **Config ▾** menu in the header puts that saved snapshot where you can see it:
+  - **Export config** downloads the current configuration as `picoharness-config-<timestamp>.json` and the console prints
+    `Exported <file name>`. That is how you move a setup to another machine, keep a backup, or hand a board definition to a
+    colleague.
+  - **Import config** takes such a JSON file, replaces the configuration at once, and pushes it to the board; the console
+    reports `Imported {n} entries`. A file that is not a PicoHarness config is rejected with `Import failed: …`.
+  - **Clear config** asks first ("Clear the saved configuration? Lane bindings, PWM settings and buses all return to
+    unassigned."), then drops every binding and deletes the browser copy as well.
+  - The small line at the bottom of the menu is the point: **the config lives in the browser, not on the board**.
+- To bypass the menu, run `localStorage.clear()` in the browser console and refresh.
+
+An imported file may not fit the board in front of you. **While connected, the handshake checks every binding against the
+capability table the device reported** and un-binds the pins this firmware cannot serve, naming them per function in the
+console, e.g. `Unbound PWM pins this firmware cannot drive: GP1 GP2` or `Unbound pins outside this firmware's UART pairs: GP10`.
+The released pins go back to the pool and the card survives, so you can drop in a legal partner. Importing while disconnected
+skips the check; the next handshake runs it anyway.
 
 Note that the configuration lives in the **browser**, not in the board. Move to another PC and you configure from scratch.
 After the board loses power, its own configuration is zeroed; the page's once-per-second reconciliation replays it back.

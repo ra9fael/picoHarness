@@ -16,16 +16,37 @@ are probed once at boot and cached (the I2C sweep is slow), so a host that joins
 has to restart the device to learn the version and capability table.
 
 The host now identifies the protocol port with a nonce ping: both CDC ports share one VID/PID and
-getInfo() cannot tell them apart, so the only port that answers is the one running code.py. Already
-authorized ports are probed in turn, which makes a reconnect cost zero clicks.
+getInfo() cannot tell them apart, so the only port that answers is the one running code.py. All
+authorized ports are pinged in parallel, connection starts on the first positive answer instead of
+waiting the silent ones out, and role verdicts are cached for 4 s — a reconnect costs zero clicks and
+no longer pays another round of timeouts. Only when nothing answers does the host restart the device
+program, and it picks that candidate by which port actually carried device traffic, because
+usb_cdc.data ignores Ctrl+C/Ctrl+D and kicking it cannot wake code.py.
 
-The console gained an "attach log port" button: it opens the console port on demand so device
-print output and tracebacks are mirrored live, and entering the REPL touches only that port —
-the protocol link stays up.
+The console gained an "attach log port" button: on a dual-CDC board the page attaches the console port
+by itself right after the handshake, so device print output and tracebacks are mirrored live, and the
+button is still there when the port was never authorized. The status light now names the port roles —
+"Connected · dual CDC · log port ✓", a single-port board reads "Connected · single port (legacy)" and
+keeps a standing warning banner at the top of the page. Entering the REPL touches only the console
+port, so the data port's connection is never dropped and leaving the REPL costs no port picker; to be
+frank about it, though, the REPL is entered with Ctrl+C, which stops code.py, so during that time
+nothing answers the protocol — dual CDC removes the re-picking, not the interruption.
+
+The console also gained a "raw stream" switch, off by default: with it on, the protocol port's raw
+JSON/binary bytes are mirrored into the terminal too, for when you want to read the wire format.
+
+The header gained a "Config" menu: export the configuration as picoharness-config-<timestamp>.json,
+import a file and apply it immediately, or clear everything behind a confirmation. While connected, the
+handshake checks every restored binding against the device's own capability table and un-binds pins
+this firmware cannot drive, naming them in the console — so a config copied from another board no
+longer sits there looking alive while every request fails.
+
+Failure messages now read symptom → cause → next step, e.g. "No protocol port found" states the two
+likely causes (code.py missing, boot.py changed without a hard reset) and the action for each.
 
 A single-port fallback is kept for one release: without boot.py on G:, usb_cdc.data is None and the
 firmware stays on one port; when hello fails, the host falls back to restarting the device and
-waiting for its broadcast ready line.
+waiting for its broadcast ready line. The next release drops single-port mode.
 
 Two constraints measured on hardware: boot.py only takes effect on a hard reset (a Ctrl-D soft
 reboot does not re-run it), and the CircuitPython REPL wants \r\n — a line ending in \n alone is
