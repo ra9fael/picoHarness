@@ -100,7 +100,7 @@
   // so the UI must keep mirroring the protocol port.
   var single = !!window.__MOCK_SINGLE;
   CAPS.usb.data = !single;
-  var granted = single ? [data] : [data, cons];
+  var granted = single || window.__MOCK_HIDE_CONSOLE ? [data] : [data, cons];
 
   window.__mock = {
     ports: granted,

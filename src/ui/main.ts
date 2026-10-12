@@ -67,14 +67,23 @@ function applyModeLabels() {
 }
 
 function syncUi() {
-  statusEl.textContent = t(STATE_KEY[linkState]);
+  // The log-port role only exists on a dual-CDC board; a single-port board has
+  // nothing separate to attach, so its status line says nothing about it.
+  const roles =
+    linkState === "ready" && link.dualCdc
+      ? " · " + t("st_dual") + " · " + t(link.consoleAttached ? "st_log_on" : "st_log_off")
+      : linkState === "ready"
+      ? " · " + t("st_single")
+      : "";
+  statusEl.textContent = t(STATE_KEY[linkState]) + roles;
   statusEl.className =
     linkState === "ready" || linkState === "repl" ? "ok" : linkState === "closed" ? "" : "bad";
   btnConnect.textContent = linkState === "closed" ? t("btn_connect") : t("btn_disconnect");
   btnConnect.disabled = !hasSerial || linkState === "connecting";
   const logged = link.consoleAttached;
   btnLog.textContent = t(logged ? "btn_logport_on" : "btn_logport");
-  btnLog.disabled = logged || linkState !== "ready";
+  btnLog.disabled = logged || linkState !== "ready" || !link.dualCdc;
+  btnLog.title = link.dualCdc ? "" : t("logport_need_dual");
   btnRaw.classList.toggle("on", consolePanel.rawStreamOn());
   btnRaw.title = t("raw_hint");
   btnPing.disabled = btnEcho.disabled = linkState !== "ready" || consolePanel.mode !== "monitor";
@@ -102,6 +111,7 @@ link.onStateChange = (s) => {
   linkState = s;
   syncUi();
 };
+link.onHint = (m) => consolePanel.note(m);
 link.onEvent = (m) => {
   if (m.evt === "ready") {
     // Only reaches here when the program restarted under an established link
@@ -136,8 +146,13 @@ btnConnect.addEventListener("click", async () => {
   try {
     const ready = await link.connect();
     wb.setCaps(ready.caps);
+    // On a dual-CDC board the console port is the only place print() and
+    // tracebacks appear, so take it when the browser already has leave to.
+    if (link.dualCdc) await link.autoAttachConsole();
     uartTerms.onLinkReady();
+    syncUi();
     consolePanel.note(tf("handshake_ok", JSON.stringify(ready)));
+    if (link.dualCdc && !link.consoleAttached) consolePanel.note(t("hint_logport_missing"));
   } catch (e: any) {
     consolePanel.note(tf("handshake_fail", e.message));
     if (link.state === "connecting") {

@@ -108,10 +108,11 @@ export class ConsolePanel {
     return this.showProto;
   }
 
-  // With no console port on the board the protocol port is the only way to see
-  // anything the device sends, so its stream stays visible there.
+  // On a dual-CDC board the protocol port never carries the device's own
+  // output, so its stream is noise whether or not the log port is attached yet.
+  // A single-port board has no other way to see anything, so it stays visible.
   private protoVisible(): boolean {
-    return this.showProto || !this.link.consoleAttached;
+    return this.showProto || !this.link.dualCdc;
   }
 
   // Debug switch: also mirror the protocol port, whose bytes are normally just

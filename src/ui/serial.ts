@@ -23,6 +23,9 @@ export class SerialLink {
   onRawData: (bytes: Uint8Array, role: PortRole) => void = () => {};
   onFrame: (payload: Uint8Array) => void = () => {};
   onStateChange: (state: LinkState) => void = () => {};
+  // Explains a step while it happens (the port picker is about to open again).
+  // Separate from onLog, which carries wire chatter.
+  onHint: (msg: string) => void = () => {};
 
   private tp = new Transport();
   private rpc = new Rpc((s) => this.tp.writeRaw(s));
@@ -60,6 +63,27 @@ export class SerialLink {
     return this.ctl !== null;
   }
 
+  // Whether the board exposes a separate data port (boot.py present and applied
+  // on a hard reset). Drives the status bar and the log-port affordance.
+  get dualCdc(): boolean {
+    return this.capsUsbData;
+  }
+
+  // Attach the console port if the browser is already allowed to use it. Never
+  // opens the picker, so it is safe to call from the connect flow: a user who
+  // has not authorised the second port simply gets false and the button.
+  async autoAttachConsole(): Promise<boolean> {
+    if (this.ctl) return true;
+    for (const p of await grantedPorts()) {
+      if (this.tp.owns(p)) continue;
+      if ((await probePort(p)) === "console") {
+        await this.openConsole(p);
+        return true;
+      }
+    }
+    return false;
+  }
+
   // The transport control bytes go to: the console port when we have one,
   // otherwise the single port that does everything.
   private control(): Transport {
@@ -88,6 +112,8 @@ export class SerialLink {
       // Nothing answered a ping, so code.py is not running (stopped at the REPL
       // or crashed). Ctrl+C/Ctrl+D on a console port restarts it, then look
       // again — the protocol port only ever answers once the program is up.
+      // The retry opens the picker a second time, so say so first.
+      this.onHint(t("hint_second_picker"));
       const cand = found.others[0] ?? (await askNewPort());
       await this.kick(cand);
       found = await findProtocolPort();
