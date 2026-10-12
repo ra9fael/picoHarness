@@ -340,7 +340,7 @@ A button switches modes. When you switch to REPL, any open UART tab yields to Co
 lives on the console port and one port allows only one owner. Be clear about what dual CDC actually saves you: the REPL touches
 only that port, so the **data port's connection is never dropped** — leaving the REPL costs no port picker and no re-authorization.
 But entering the REPL means `Ctrl+C`, which stops `code.py`, so during a REPL session **nothing answers the protocol** and every
-lane is dead (see section 9 of the [sample program guide](../03_Sample_Program_User_Guide/README.md)). Switching back to Monitor
+lane is dead (see section 10 of the [sample program guide](../03_Sample_Program_User_Guide/README.md)). Switching back to Monitor
 restarts the device program and re-runs the handshake (the board's volatile configuration is cleared; the page immediately
 re-applies it).
 

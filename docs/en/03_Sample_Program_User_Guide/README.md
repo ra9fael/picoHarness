@@ -2,7 +2,7 @@
 
 This document does not cover interfaces. It covers "I want to do X, what do I click".
 Every recipe stands on its own, so pick the ones you need.
-When an error makes no sense, jump to the [troubleshooting table](#10-troubleshooting) at the end.
+When an error makes no sense, jump to the [troubleshooting table](#11-troubleshooting) at the end.
 
 Before you start: the board is prepared per [01 User Manual §2](../01_GUIApp_FW_Manual/README.md#2-prepare-the-board),
 the host app is connected, the status light shows ready, and the handshake log contains `caps`.
@@ -218,7 +218,64 @@ This is the most common failure in board-to-board work, and the symptom is "I do
 
 ---
 
-## 9. Try Something Quickly in the REPL
+## 9. An SPI Transaction: Reading a Flash Chip's JEDEC ID
+
+**Goal**: find out what this bench actually puts on the bus. It runs one full-duplex
+transaction at a time, so the write and the read happen on **the same clock run** — it is
+not "write, then read".
+
+**Wiring** (a SPI Flash as the example device):
+
+```
+board GP2 ──── SCK
+board GP3 ──── MOSI (the device's DI)
+board GP4 ──── MISO (the device's DO)
+board GP5 ──── CS#
+board GND ──── GND
+```
+
+GP2/GP3/GP4 are the SCK/MOSI/MISO of **one group**, which is why this works. Swap GP4 for
+GP8 and the set spans two groups — the UI will not even let you drop it in. GP5 is not in
+the SPI data-pin table at all: chip select is a plain output, so any unused GP can serve.
+
+**Steps**:
+
+1. Drag GP2 into the SCK slot, GP3 into MOSI, GP4 into MISO, and GP5 into the CS0 slot.
+   The card shows CS0..CS3 all the time; whichever ones you fill become the selectable
+   chip selects.
+2. Pick 1 MHz for the clock and mode 0 (CPOL=0 / CPHA=0, the default of most devices).
+3. Put `9f` in Write(hex), `4` in Read bytes, choose `CS0` in the Chip select dropdown,
+   leave Hold CS unchecked, and press **Transfer**.
+4. The result line looks like:
+
+```
+FF EF 40 18  ·  read 4 bytes  ·  actual 1000000 Hz
+```
+
+**Why read four bytes**: the 0x9F command itself consumes 8 clocks and the 3-byte ID comes
+after them. Full duplex means those 8 clocks are receiving too, so the first byte you get
+back is whatever the device had on DO before it decoded the command — the real ID is bytes
+2..4. The firmware pads a short `w` with `0xFF` up to the length of `r`, so the bus actually
+sees `9F FF FF FF`, which is exactly what RDID wants: after the command, MOSI is don't-care.
+
+**If you want the two phases separated** (some devices need something between command and read):
+
+| order | Write(hex) | Read bytes | Hold CS | what goes on the bus |
+| --- | --- | --- | --- | --- |
+| 1 | `9f` | `0` | checked | CS falls, 8 clocks, CS **stays down** |
+| 2 | empty | `3` | unchecked | 24 more clocks, 3 bytes back, then CS rises |
+
+The second transaction still names `CS0`: that line is already low, so driving it low again
+creates no new edge — this is one continuous selection, not two independent transactions.
+Remember to release Hold CS on the last one, or CS sits low and the device keeps waiting.
+
+**When the ID makes no sense**: check whether the chip select was left out. If the dropdown
+is on "—", every CS stays high for the whole run, the device is never selected, and you are
+clocking a floating line. That mode exists on purpose — it is how you grab the clocks alone.
+
+---
+
+## 10. Try Something Quickly in the REPL
 
 **Goal**: bypass the protocol and run any CircuitPython code you like on the board.
 
@@ -235,9 +292,9 @@ UART tabs also yield to the main terminal when you enter the REPL and unsubscrib
 
 ---
 
-## 10. Troubleshooting
+## 11. Troubleshooting
 
-### 10.1 Error Message Lookup
+### 11.1 Error Message Lookup
 
 | Symptom (exact text in the UI) | Cause | Next step |
 | --- | --- | --- |
@@ -251,8 +308,14 @@ UART tabs also yield to the main terminal when you enter the REPL and unsubscrib
 | `Invalid variable_frequency` | Two pins in one slice want different frequencies, or you changed `.frequency` in fixed-frequency mode | Accept the shared frequency, or move the two pins into different slices. |
 | The board's serial output is only `ImportError: no module named 'asyncio'` | asyncio is not installed on the device | Run `circup install asyncio`. Afterwards `G:\lib` should contain `asyncio/` and `adafruit_ticks.mpy`. |
 | `RuntimeError: this bus has no TX pin / no RX pin` | Half bus, an expected limitation | If you need both directions, add the other wire. |
+| `ValueError: busio.SPI on rp2 needs at least a MOSI or a MISO pin` | Only SCK is bound | Add at least one data pin. Transmit-only or receive-only is legal; a lone SCK is not. |
+| `... is not a routable set: rp2 SPI pins come in fixed groups ...` (the UI-side equivalent is `SCK/MOSI/MISO must come from one pin group (one hardware SPI)`) | The three data pins span two groups | Re-pick from one entry of `caps.spi.groups`. The UI refuses to drop a cross-group pin in the first place. |
+| `could not build SPI on ...: SPI peripheral in use` | Both groups are taken, so a third bus has no hardware left | Release one bus, or move the two buses onto separate groups. |
+| `RuntimeError: GP5 already belongs to SPI bus 0 — release it first` | Two buses want the same pin, usually a reused chip select | Use another free GP as CS, or release the old bus. |
+| `SPI command failed: no CS 1 on this bus (it has 1)` | The transaction named a CS index that does not exist | Fill that CS slot on the card, or set the dropdown back to CS0 / "—". |
+| `RuntimeError: this bus has no MISO pin — nothing to read` | A MOSI-only half bus was asked to read | Add MISO, or keep that bus write-only. |
 
-### 10.2 Cannot Connect, Handshake Stalls
+### 11.2 Cannot Connect, Handshake Stalls
 
 Work through these in order; any one of them may fix it outright.
 
@@ -268,7 +331,7 @@ Work through these in order; any one of them may fix it outright.
    title, and it sticks to the front of the `ready` JSON. The host app locates the `{` and cuts it away. If you write your own host
    script, handle it as well, otherwise you will think JSON parsing failed.
 
-### 10.3 The UI Behaves Oddly
+### 11.3 The UI Behaves Oddly
 
 - **A function re-sends its configuration once per second**: the device keeps refusing that state, so drift reconciliation reissues it every second.
   Newer builds suppress this with the "rejected" latch. If the log still floods, delete that bus card and build it again.
@@ -279,7 +342,7 @@ Work through these in order; any one of them may fix it outright.
 - **No trace in the scope**: confirm the channel button is lit; an ADC channel has to be bound in the lane already.
   Roll mode scrolls at fixed depth, so little data looks like "nothing moving". FIFO is easier to read.
 
-### 10.4 The Data Looks Wrong
+### 11.4 The Data Looks Wrong
 
 - **ADC readings jump a lot**: bad common ground, or the source impedance is too high (ADC source impedance should stay under 10 kΩ).
   On the software side only the deadband filter helps, and it cannot fix the cause.
@@ -287,6 +350,11 @@ Work through these in order; any one of them may fix it outright.
   curve at 0.03 °C/LSB, so accuracy was never the goal.
 - **I2C reads back all 0x00 or all 0xFF**: the address is in the wrong 8-bit/7-bit form, or the device is unpowered.
 - **UART shows garbage at a fixed ratio**: the two sides use different baud rates.
+- **SPI reads back all 0xFF or all 0x00**: most likely the chip select was left out — with the
+  dropdown on "—" every CS stays high, the device is never selected, and MISO only shows its
+  pull state. Only after that consider MOSI and MISO swapped.
+- **SPI data shifts by a few bits between runs**: the CPOL/CPHA mode does not match what the
+  device wants. Set the mode from the device datasheet first.
 
 ---
 
