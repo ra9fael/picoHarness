@@ -8,20 +8,73 @@
 (function () {
   var enc = new TextEncoder();
   var dec = new TextDecoder();
+  // Caps for one believable device: a Pico 2 W on CircuitPython, i.e. exactly the
+  // GPIOs its official board table names (ports/raspberrypi/boards/
+  // raspberry_pi_pico2_w/pins.c: GP0..GP22 and GP26..GP28 -- GP23/24/25 are not in
+  // that table, they are the CYW43 SMPS_MODE/LED/VBUS_SENSE pins, and GP29 reaches
+  // Python only as A3/VOLTAGE_MONITOR). The holes are the point of this mock: the
+  // pool, the badges and every legality predicate have to work on a pin set that is
+  // not 0..N.
+  // The tables are GENERATED with the same rules the firmware uses (see code.py
+  // probe_uart / probe_i2c_pairs and pico-sdk hardware/gpio.h), so the mock can
+  // never drift into asserting a stale hand-copied list.
+  var GPS = [];
+  for (var g = 0; g <= 22; g++) GPS.push(g);
+  for (g = 26; g <= 29; g++) GPS.push(g);
+  // GP29 has no "GP29" attribute on this board, but code.py still numbers it: a
+  // pin whose only names are ADC aliases (A3/VOLTAGE_MONITOR) is addressed as
+  // ADC_BASE + channel, and A0 carries the GP token that gives the base. The
+  // holes at GP23/24/25 stay holes because SMPS_MODE/LED/VBUS_SENSE expose
+  // neither a GP name nor an A-channel. The holes are the point of this mock:
+  // the pool, the badges and every legality predicate have to work on a pin set
+  // that is not 0..N.
+  var has = function (n) { return GPS.indexOf(n) >= 0; };
+  // The RP2350A ADC window from pico-sdk platform_defs.h (ADC_BASE_PIN=26,
+  // NUM_ADC_CHANNELS=5) intersected with what this board names; +100 is the
+  // virtual on-die temperature channel.
+  var ADC = [];
+  for (var a = 26; a <= 29; a++) if (has(a)) ADC.push(a);
+  ADC.push(100);
+  var inst = function (n) { return ((n + 4) / 8 | 0) % 2; }; // CP UART.c
+  var UART_TX = GPS.filter(function (n) { return n % 2 === 0; });
+  var UART_RX = GPS.filter(function (n) { return n % 2 === 1; });
+  var UART_PAIRS = [];
+  UART_TX.forEach(function (t) {
+    UART_RX.forEach(function (r) { if (inst(t) === inst(r)) UART_PAIRS.push([t, r]); });
+  });
+  var I2C_PAIRS = [];
+  GPS.forEach(function (scl) {
+    if (scl % 2 !== 1) return; // CP I2C.c: SCL odd, SDA even, one and the same peripheral
+    GPS.forEach(function (sda) {
+      if (sda % 2 === 0 && ((scl / 2 | 0) % 2) === ((sda / 2 | 0) % 2)) I2C_PAIRS.push([scl, sda]);
+    });
+  });
+  // The two SPI peripherals, from the F1 column of the same table (no CSn rows:
+  // busio.SPI takes no CS pin), projected onto this board's GPIOs the way the
+  // firmware's caps.spi does.
+  var SPI_FULL = [
+    { sck: [2, 6, 18, 22, 34, 38], mosi: [3, 7, 19, 23, 35, 39], miso: [0, 4, 16, 20, 32, 36] },
+    { sck: [10, 14, 26, 30, 42, 46], mosi: [11, 15, 27, 31, 43, 47], miso: [8, 12, 24, 28, 40, 44] },
+  ];
+  var SPI_GROUPS = SPI_FULL.map(function (grp) {
+    var out = {};
+    Object.keys(grp).forEach(function (role) {
+      out[role] = grp[role].filter(has);
+    });
+    return out;
+  });
   var CAPS = {
-    pins: 29,
-    pwm: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22],
-    adc: [26, 27, 28, 100],
-    i2c_pairs: [[1, 0], [5, 4], [9, 8], [13, 12], [17, 16], [21, 20]],
-    uart: { tx: [0, 2, 4, 6, 8], rx: [1, 3, 5, 7, 9], pairs: [[0, 1], [2, 3], [4, 5], [6, 7], [8, 9]] },
+    gp: GPS,
+    pins: GPS[GPS.length - 1] + 1, // highest named GPIO + 1, as code.py reports it
+    pwm: GPS.slice(), // every RP2350 GPIO carries a PWM channel (F4 column)
+    adc: ADC,
+    i2c_pairs: I2C_PAIRS,
+    uart: { tx: UART_TX, rx: UART_RX, pairs: UART_PAIRS },
     usb: { data: true },
     // Mirrors the firmware's caps.spi — the two rp2350 SPI pin groups measured by
     // tools/spi_probe.py, one CS budget, and the 75 MHz divider ceiling.
     spi: {
-      groups: [
-        { sck: [2, 6, 18, 22], mosi: [3, 7, 19, 23], miso: [0, 4, 16, 20] },
-        { sck: [10, 14, 26], mosi: [11, 15, 27], miso: [8, 12, 24, 28] },
-      ],
+      groups: SPI_GROUPS,
       max_buses: 2,
       max_cs: 4,
       baud_ceiling: 75000000,
