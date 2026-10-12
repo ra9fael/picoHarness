@@ -4,6 +4,34 @@ PicoHarness 版本说明
 界面与固件要配套：旧固件收不到新命令，会回 "unknown cmd"。
 
 
+[20261012 0.1.16-spi]
+
+加 SPI 总线。固件新增 spi.cfg / spi.release / spi.xfer 三条命令，read_state 新增
+cfg_spi 与 spi 列表，ready.caps 新增 spi 对象（groups / max_buses / max_cs / baud_ceiling）。
+
+引脚合法性来自 tools/spi_probe.py 的上板实测，不是数据手册推导——两者在"哪些脚可路由"
+上确实不一致。穷举每个有序 (SCK, partner) 组合，53 个被接受，正好落在两组里；
+1571 组配对报 Invalid pins，100 个三元组是这两组的笛卡尔积。结论写进静态表 SPI_GROUPS，
+开机不扫描（扫描要 1600+ 次构造调用，而答案是芯片属性，不会因接线而变）。
+
+端口行为决定了 API 形状：构造函数只收位置参数（baudrate= 直接 TypeError，
+half_duplex= NotImplementedError），只给 SCK 会被拒（Must provide MISO or MOSI pin），
+因此速率与模式在建好之后于锁内 configure()。半总线（缺 MOSI 或缺 MISO）合法，
+和 UART 一个口径。片选不属于 busio.SPI：固件把每路 CS 当普通输出脚，空闲为高、
+事务期间拉低，于是一条总线最多带 SPI_MAX_CS=4 路器件；CS 同样登记 owner="spi"，
+在界面上算占用，防止主机用 gpio.set 在事务中间改动选中状态。
+
+时钟沿用 PWM 的 hfreq 诚实口径，字段名 hbaud：rp2 只能把 150 MHz 除以偶数整数，
+上限 75 MHz，所以请求 2 MHz 实跑 1973684 Hz、10 MHz 实跑 9375000 Hz，卡片把这行打在结果里。
+这个口的全双工只有 write_readinto() 一个调用且要求等长缓冲区，
+固件把短的写用 0xFF 补到 max(len(w), r)，读回截前 r 字节。
+
+界面新增 SPI 泳道（总线卡片：SCK/MOSI/MISO 三个数据槽 + CS0..CS3）与事务台，
+一次一笔原始字节事务，支持"保持片选"做分两段的事务、片选下拉选"—"表示全程不动片选。
+跨组的脚拖不进去，第三路总线在界面就被挡下。配置随其它总线一起进 localStorage，
+漂移对账把 cs 顺序、baud、mode 都算进签名。
+
+
 [20261012 0.1.15-pwmhz]
 
 固件把 PWM 的真实频率说出来。rp2 的分频器只能生成 125 MHz/(div×(top+1))，实测下限 9 Hz：

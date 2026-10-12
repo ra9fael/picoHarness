@@ -5,6 +5,39 @@ repository commit. UI and firmware must be used as a matched pair: an old firmwa
 recognise new commands and answers "unknown cmd".
 
 
+[20261012 0.1.16-spi]
+
+SPI buses arrived. The firmware gained spi.cfg / spi.release / spi.xfer, read_state gained cfg_spi
+and the spi list, and ready.caps gained the spi object (groups / max_buses / max_cs / baud_ceiling).
+
+Pin legality comes from tools/spi_probe.py run on the board, not from the datasheet — the two really
+do disagree about which pins are routable. The sweep tried every ordered (SCK, partner) combination:
+53 were accepted and they fall into exactly two groups, 1571 pairs raised Invalid pins, and the 100
+accepted triples are the cross-product of those groups. The conclusion is stored as the static
+SPI_GROUPS table with no boot-time sweep, because the exhaustive version is 1600+ constructor calls
+and the answer is a property of the silicon, not of the wiring.
+
+The port's behaviour shaped the API: the constructor takes pins positionally (baudrate= raises
+TypeError, half_duplex= raises NotImplementedError), a bare SCK is refused with Must provide MISO or
+MOSI pin, so speed and mode are applied with configure() under the lock after the object exists.
+A half bus (no MOSI or no MISO) is legal, matching UART. Chip select is not part of busio.SPI on this
+port: the firmware drives each CS as a plain output that idles high and falls for one transaction, so
+one bus can serve up to SPI_MAX_CS=4 devices. CS is registered under owner="spi" too, which makes it
+show as occupied in the UI and stops a host from moving a select with gpio.set mid-transaction.
+
+The clock keeps the honesty PWM introduced with hfreq, under the field name hbaud: the rp2 divides
+150 MHz by an even integer only, ceiling 75 MHz, so a request for 2 MHz runs at 1973684 Hz and 10 MHz
+at 9375000 Hz — the card prints that line in its result. This port's only full-duplex call is
+write_readinto(), which wants two equal buffers, so the firmware pads a short write with 0xFF up to
+max(len(w), r) and returns the first r bytes.
+
+The UI gained the SPI lane (a bus card with SCK/MOSI/MISO slots plus CS0..CS3) and a transaction bench
+that runs one raw byte transaction at a time. Hold CS segments a transaction in two, and choosing "—"
+in the chip-select dropdown runs the clocks without asserting anything. Cross-group pins cannot be
+dropped, and a third bus is refused in the UI. The configuration persists with the other buses, and
+drift reconciliation folds CS order, baud and mode into the signature.
+
+
 [20261012 0.1.15-pwmhz]
 
 The firmware now tells the truth about PWM frequency. The rp2 divider can only generate
