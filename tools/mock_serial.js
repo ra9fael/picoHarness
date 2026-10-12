@@ -13,7 +13,7 @@
     pwm: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22],
     adc: [26, 27, 28, 100],
     i2c_pairs: [[1, 0], [5, 4], [9, 8], [13, 12], [17, 16], [21, 20]],
-    uart: { tx: [2, 4, 6, 8], rx: [3, 5, 7, 9], pairs: [[2, 3], [4, 5], [6, 7], [8, 9]] },
+    uart: { tx: [0, 2, 4, 6, 8], rx: [1, 3, 5, 7, 9], pairs: [[0, 1], [2, 3], [4, 5], [6, 7], [8, 9]] },
     usb: { data: true },
   };
 
@@ -79,7 +79,7 @@
         if (!m || !m.cmd) return;
         if (m.cmd === "ping") return p.send({ id: m.id, ok: true, data: { pong: m.args.t } });
         if (m.cmd === "hello")
-          return p.send({ id: m.id, ok: true, data: { version: "0.1.13-mock", caps: CAPS } });
+          return p.send({ id: m.id, ok: true, data: { version: "0.1.14-mock", caps: CAPS } });
         if (m.cmd === "echo")
           return p.send({ id: m.id, ok: true, data: { msg: m.args.msg } });
         if (m.cmd === "gpio.state")

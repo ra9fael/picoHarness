@@ -65,7 +65,7 @@ if DATA is not None:
     DATA.timeout = 0  # read() returns immediately instead of waiting for bytes
 
 APP = "PicoHarness"
-VERSION = "0.1.13-dualcdc"
+VERSION = "0.1.14-uart01"
 NUM_PINS = 29  # GP0..GP28: Pico-family boards expose up to GP28; on rp2040 GP27/28 are ADC1/ADC2
 
 # Virtual ADC channel id for the on-die temperature sensor. It is not a GP pin,
@@ -766,14 +766,8 @@ def probe_uart():
     # Instance per TX/RX pin, read straight off Table 3 (Pico 2 breaks out GP0..26).
     tx_inst = {0: 0, 2: 0, 4: 1, 6: 1, 8: 1, 10: 1, 12: 0, 14: 0, 16: 0, 18: 0, 20: 1, 22: 1, 24: 1, 26: 1}
     rx_inst = {1: 0, 3: 0, 5: 1, 7: 1, 9: 1, 11: 1, 13: 0, 15: 0, 17: 0, 19: 0, 21: 1, 23: 1, 25: 1}
-    # GP0/GP1 are the RP2350 UART0 TX/RX that CircuitPython's own serial console
-    # keeps claimed at boot, so busio.UART() on them raises "GP1 in use". They are
-    # hardware-legal but never usable here — drop them so the UI never offers a
-    # pair that fails (this was the source of the "works sometimes, not others"
-    # flakiness). Other UART0 pins (GP2/3, GP12/13, ...) stay available.
-    reserved = {0, 1}
-    tx_ok = [n for n in sorted(tx_inst) if n < NUM_PINS and n not in reserved]
-    rx_ok = [n for n in sorted(rx_inst) if n < NUM_PINS and n not in reserved]
+    tx_ok = [n for n in sorted(tx_inst) if n < NUM_PINS]
+    rx_ok = [n for n in sorted(rx_inst) if n < NUM_PINS]
     pairs = [[t, r] for t in tx_ok for r in rx_ok if tx_inst[t] == rx_inst[r]]
     return {"tx": tx_ok, "rx": rx_ok, "pairs": pairs}
 
