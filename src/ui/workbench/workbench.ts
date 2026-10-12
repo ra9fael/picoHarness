@@ -3,7 +3,7 @@
 // reconciliation poll; all function-specific behavior lives in the defs.
 // Adding I2C/SPI later = write a def module and push it into this.defs.
 import type { SerialLink, JsonMsg } from "../serial";
-import { PinModel, SLOTS, TEMP, R_ADC, R_PWM, R_I2C, R_UART, R_SPI, pinLabel } from "../model/pins";
+import { PinModel, SLOTS, C_ADC, C_SCL, C_SDA, C_TX, C_RX, C_SCK, C_MOSI, C_MISO, C_PWM, R_ADC, R_PWM, R_I2C, R_UART, R_SPI, pinLabel } from "../model/pins";
 import { blankConfig, clearStored, configText, importConfig as importSnapshot, loadConfig, saveConfig } from "../model/store";
 import { t, tf, type MsgKey } from "../i18n";
 import { el } from "./dom";
@@ -16,6 +16,29 @@ import { UartDriver, makeUartDef } from "./uart";
 import { SpiDriver, makeSpiDef } from "./spi";
 
 const POLL_MS = 1000; // drift reconciliation; live levels come via gpio_in
+
+// One row per badge letter: the caps table that has to have been reported before
+// the letter may appear at all, the capability bit that lights it, and `first`
+// when the role is disjoint on rp2 (a pin is either SCL or SDA, and one SPI line
+// at a time) so only the first match of that group renders. TX and RX may stack,
+// because a pin can carry both directions of different instances.
+const BADGES: {
+  gate: "pins" | "i2c" | "uart" | "spi";
+  cap: number;
+  t: string;
+  k: MsgKey;
+  first?: boolean;
+}[] = [
+  { gate: "pins", cap: C_PWM, t: "P", k: "cap_p" },
+  { gate: "pins", cap: C_ADC, t: "A", k: "cap_a" },
+  { gate: "i2c", cap: C_SCL, t: "S", k: "cap_s", first: true },
+  { gate: "i2c", cap: C_SDA, t: "D", k: "cap_d", first: true },
+  { gate: "uart", cap: C_TX, t: "T", k: "cap_t" },
+  { gate: "uart", cap: C_RX, t: "R", k: "cap_r" },
+  { gate: "spi", cap: C_SCK, t: "CK", k: "cap_ck", first: true },
+  { gate: "spi", cap: C_MOSI, t: "DO", k: "cap_do", first: true },
+  { gate: "spi", cap: C_MISO, t: "DI", k: "cap_di", first: true },
+];
 
 export class Workbench {
   readonly model = new PinModel();
@@ -273,7 +296,6 @@ export class Workbench {
     const cur = model.roles[n];
     if (role === 0) return cur !== 0;
     if (cur === role) return false;
-    if (n === TEMP && role !== R_ADC) return false; // temperature is ADC-only
     const def = this.defOf(role);
     if (!def || !def.accept(this.api, n)) return false;
     return this.link.state === "ready";
@@ -322,29 +344,21 @@ export class Workbench {
   private mkChip(n: number, def: FunctionDef | null): HTMLElement {
     const c = el("chip", "span");
     c.draggable = this._active;
-    // Each badge letter stands for one caps table the firmware actually reported;
-    // a table it never sent shows no badge at all. The rows of the rp2 function
-    // table are disjoint per pin, so SPI is one of CK/DO/DI, never two.
+    const gates = {
+      pins: this.model.capsKnown,
+      i2c: this.model.i2cPairKnown,
+      uart: this.model.uartKnown,
+      spi: this.model.spiKnown,
+    };
     const badges: [string, MsgKey][] = [];
-    if (this.model.capsKnown) {
-      if (this.model.pwmCap(n)) badges.push(["P", "cap_p"]);
-      if (this.model.adcCap(n)) badges.push(["A", "cap_a"]);
-    }
-    if (this.model.i2cPairKnown) {
-      // rp2 I2C roles are exclusive (SCL = odd, SDA = even), so a pin is one or
-      // the other — the badge literally tells you which line it belongs on.
-      if (this.model.i2cRoleCap(n, "scl")) badges.push(["S", "cap_s"]);
-      else if (this.model.i2cRoleCap(n, "sda")) badges.push(["D", "cap_d"]);
-    }
-    if (this.model.uartKnown) {
-      // A UART pin may be TX-capable, RX-capable, or both, so concatenate.
-      if (this.model.uartRoleCap(n, "tx")) badges.push(["T", "cap_t"]);
-      if (this.model.uartRoleCap(n, "rx")) badges.push(["R", "cap_r"]);
-    }
-    if (this.model.spiKnown) {
-      if (this.model.spiRoleCap(n, "sck")) badges.push(["CK", "cap_ck"]);
-      else if (this.model.spiRoleCap(n, "mosi")) badges.push(["DO", "cap_do"]);
-      else if (this.model.spiRoleCap(n, "miso")) badges.push(["DI", "cap_di"]);
+    const lit: Record<string, boolean> = {};
+    for (const b of BADGES) {
+      if (!gates[b.gate] || !this.model.hasCap(n, b.cap)) continue;
+      if (b.first) {
+        if (lit[b.gate]) continue;
+        lit[b.gate] = true;
+      }
+      badges.push([b.t, b.k]);
     }
     c.innerHTML = `<b>${pinLabel(n)}</b>`;
     if (badges.length) {
@@ -441,7 +455,7 @@ export class Workbench {
       // table like raspberry_pi_pico2_w leaves holes (GP23/24/25 are CYW43 pins
       // there) and stops short of GP47, and a chip the firmware cannot address
       // would be a chip that always refuses.
-      if (n !== TEMP && !this.model.isAddressable(n)) continue;
+      if (!this.model.isOffered(n)) continue;
       const role = this.model.roles[n];
       if (this.busRoles.has(role)) continue; // shown inside its bus card slot
       const def = this.defOf(role);

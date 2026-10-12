@@ -2,7 +2,7 @@
 // toggle). One shared driver debounces gpio.cfg pushes so rapid assignments
 // collapse into a single command.
 import { t, tf } from "../i18n";
-import { R_IN, R_OUT, isBit } from "../model/pins";
+import { C_IN, C_OUT, R_IN, R_OUT, isBit } from "../model/pins";
 import { el } from "./dom";
 import { ICON } from "./icons";
 import type { FuncApi, FunctionDef } from "./types";
@@ -86,7 +86,7 @@ export function makeDigitalDefs(drv: DigitalDriver): FunctionDef[] {
     labelKey: "lane_in",
     cls: "l-in",
     icon: ICON[R_IN],
-    accept: () => true,
+    accept: (api, n) => api.model.hasCap(n, C_IN),
     assign: (api) => api.scheduleGpio(),
     release: (api) => api.scheduleGpio(),
     activate: () => {},
@@ -111,7 +111,7 @@ export function makeDigitalDefs(drv: DigitalDriver): FunctionDef[] {
     labelKey: "lane_out",
     cls: "l-out",
     icon: ICON[R_OUT],
-    accept: () => true,
+    accept: (api, n) => api.model.hasCap(n, C_OUT),
     assign: (api) => api.scheduleGpio(),
     release: (api) => api.scheduleGpio(),
     activate: () => {},

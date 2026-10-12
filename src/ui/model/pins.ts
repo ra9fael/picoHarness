@@ -73,6 +73,92 @@ export const toWire = (n: number): number => (n === TEMP ? TEMP_PIN : n);
 export const fromWire = (p: number): number => (p === TEMP_PIN ? TEMP : p);
 export const pinLabel = (n: number): string => (n === TEMP ? "TEMP" : "GP" + n);
 
+// —— Capability bits ——
+// One bit per function a slot can serve, resolved from the firmware caps by
+// buildCaps() and read by every consumer after that: the lane accept callbacks,
+// the chip badges, the handshake prune and the pool listing. Before this table
+// each of those places carried its own `if`, and the on-die temperature channel —
+// the one slot that is not a GPIO — had to be re-excluded in all of them. It is
+// now a row of the table with only C_ADC|C_ONDIE set, so the predicates answer it
+// the same way they answer any other pin.
+export const C_IN = 1 << 0;
+export const C_OUT = 1 << 1;
+export const C_PWM = 1 << 2;
+export const C_ADC = 1 << 3;
+export const C_SCL = 1 << 4;
+export const C_SDA = 1 << 5;
+export const C_TX = 1 << 6;
+export const C_RX = 1 << 7;
+export const C_SCK = 1 << 8;
+export const C_MOSI = 1 << 9;
+export const C_MISO = 1 << 10;
+// An ADC channel that is not a package pin: it has no pin voltage, so the lane
+// may not offer the volts/millivolts display.
+export const C_ONDIE = 1 << 11;
+
+const C_DIGITAL = C_IN | C_OUT;
+
+// Which bit a per-pin lane requires; bus roles are absent because a bus line is
+// legal per role and per pair, and those checks live with their bus.
+const ROLE_BIT: Record<number, number> = { [R_IN]: C_IN, [R_OUT]: C_OUT, [R_PWM]: C_PWM, [R_ADC]: C_ADC };
+
+// The caps fields that decide the table. Any list is null when the firmware did
+// not report that table.
+type CapsInput = {
+  gp: number[] | null; // the GPIOs this board can name, holes and all
+  pins: number; // caps.pins: only used when the board predates caps.gp
+  pwm: number[] | null;
+  adc: number[] | null; // wire ids, so the on-die channel arrives as TEMP_PIN
+  i2c: { scl: Set<number>; sda: Set<number> } | null; // projected from i2c_pairs
+  uart: { tx: Set<number>; rx: Set<number> } | null;
+  spi: SpiGroupSet[] | null;
+};
+
+// The SPI line roles, as bits. CS is deliberately absent: it is a plain
+// output, so its legality never comes from caps.spi.
+const SPI_BIT: Record<SpiDataRole, number> = { sck: C_SCK, mosi: C_MOSI, miso: C_MISO };
+
+// Nothing reported yet — what a fresh model holds until the first caps answer, so
+// the workbench is usable before the handshake completes.
+const NO_CAPS: CapsInput = {
+  gp: null,
+  pins: 0,
+  pwm: null,
+  adc: null,
+  i2c: null,
+  uart: null,
+  spi: null,
+};
+
+// The single translation from a caps message to per-slot bits. A missing table
+// leaves its bits set for every addressable pin: an unknown caps set must reject
+// nothing, because the device is the final arbiter when the config is sent.
+function buildCaps(c: CapsInput): Uint16Array {
+  const set = (l: number[] | null): Set<number> | null => (l ? new Set(l) : null);
+  const pwm = set(c.pwm);
+  const adc = set(c.adc);
+  const table = new Uint16Array(SLOTS);
+  for (let n = 0; n < NUM; n++) {
+    const named = c.gp ? c.gp.includes(n) : c.pins > 0 ? n < c.pins : true;
+    if (!named) continue; // the firmware would answer "board has no GPn"
+    let b = C_DIGITAL;
+    if (!pwm || pwm.has(n)) b |= C_PWM;
+    if (!adc || adc.has(n)) b |= C_ADC;
+    if (!c.i2c || c.i2c.scl.has(n)) b |= C_SCL;
+    if (!c.i2c || c.i2c.sda.has(n)) b |= C_SDA;
+    if (!c.uart || c.uart.tx.has(n)) b |= C_TX;
+    if (!c.uart || c.uart.rx.has(n)) b |= C_RX;
+    if (!c.spi || c.spi.some((g) => g.sck.has(n))) b |= C_SCK;
+    if (!c.spi || c.spi.some((g) => g.mosi.has(n))) b |= C_MOSI;
+    if (!c.spi || c.spi.some((g) => g.miso.has(n))) b |= C_MISO;
+    table[n] = b;
+  }
+  // The on-die sensor is an ADC row and nothing else. It is offered while caps.adc
+  // is unknown, exactly as the pool listed it before this table existed.
+  if (!adc || adc.has(TEMP_PIN)) table[TEMP] = C_ADC | C_ONDIE;
+  return table;
+}
+
 // Pin bitmasks travel as JSON integers and are up to NUM bits wide, which is past
 // the 32-bit boundary JavaScript's shift operators work on: `1 << 33` silently
 // wraps. So every mask here is built and read with plain arithmetic instead --
@@ -121,8 +207,16 @@ export class PinModel extends Emitter {
   spiBuses: SpiBus[] = []; // SPI bus instances (sck + mosi/miso + cs lines)
   spiPinBus = new Int16Array(SLOTS).fill(-1); // slot -> owning spi id, -1 = not in a spi
   private spiBusSeq = 0; // monotonic source of spi ids
-  private pwmCaps: number[] | null = null; // firmware caps.pwm; null = unknown
-  private adcCaps: number[] | null = null;
+  // The capability table: slot -> C_* bits. Rebuilt wholesale by buildCaps() from
+  // every caps message; nothing else writes it.
+  private cap = buildCaps(NO_CAPS);
+  // Which caps tables the firmware actually reported. Legality stays permissive
+  // while a table is missing, but a badge may not be a guess, so the views gate
+  // their letters on these flags instead of on the table.
+  private knownPwm = false;
+  private knownI2c = false;
+  private knownUart = false;
+  private knownSpi = false;
   // rp2 PIO I2C legality is a property of the ORDERED (scl, sda) pair, not of
   // any single pin (real-hardware table: SCL must be odd, SDA even, and
   // sda ≡ scl-1 mod 4). We cache the firmware-probed pair set rather than
@@ -130,36 +224,39 @@ export class PinModel extends Emitter {
   // truth. null (older firmware) = unknown → permissive; the device stays the
   // final arbiter at cfg time.
   private i2cPairs: Set<string> | null = null;
-  private i2cSclPins: Set<number> | null = null; // pins usable as SCL (some pair)
-  private i2cSdaPins: Set<number> | null = null; // pins usable as SDA (some pair)
-  // rp2 hardware UART: only a fixed subset of pins carry the TX or RX function,
-  // and a full-duplex pair must sit on one UART instance, so both the per-role
-  // pin sets and the ordered (tx,rx) pair set come from caps.uart. A single pin
-  // is always a legal bus on its own (transmit- or receive-only), so pair
-  // legality only gates the case where BOTH slots are filled. null = unknown.
-  private uartTxPins: Set<number> | null = null;
-  private uartRxPins: Set<number> | null = null;
+  // rp2 hardware UART: a full-duplex pair has to sit on one UART instance, so the
+  // ordered (tx,rx) pair set comes from caps.uart alongside the per-role pin bits.
+  // A single pin is always a legal bus on its own (transmit- or receive-only), so
+  // pair legality only gates the case where BOTH slots are filled. null = unknown.
   private uartPairs: Set<string> | null = null;
   // rp2 SPI routes each peripheral from fixed pin GROUPS: SCK, MOSI and MISO all
   // have to come from one entry of caps.spi.groups, and one group means one
   // peripheral, so caps.spi.max_buses groups is how many SPI cards can be live at
-  // once. CS lines are outside the peripheral (plain outputs) and may be any free
-  // GP. Caps not known (caps.spi absent) → permissive, and the device rejects.
+  // once. Which single pin may play which role is in the capability table; the
+  // groups themselves stay here because "same group" is a set fact, not a pin
+  // fact. Caps not known (caps.spi absent) → permissive, and the device rejects.
   private spiGroups: SpiGroupSet[] | null = null;
   private spiMaxCs = 4;
   private spiMaxBuses = 2;
   private spiCeiling = 0; // 0 = unknown
-  // The GPIOs the connected board can actually name (caps.gp), which is narrower
-  // than NUM and may have holes. null = a firmware that predates caps.gp, where
-  // caps.pins was the only shape we were told -- treat it as GP0..pins-1.
-  private gpSet: Set<number> | null = null;
 
-  // Whether pin n is real on this board. Unaddressable GPIOs are not offered in
-  // the pool and reject every role, because the firmware would answer "board has
-  // no GPn" at cfg time.
+  // Reads the capability table — the only way a view is allowed to ask what a
+  // slot may do.
+  hasCap(n: number, bit: number): boolean {
+    return Number.isInteger(n) && n >= 0 && n < SLOTS && (this.cap[n] & bit) !== 0;
+  }
+
+  // Whether the board offers this slot a chip at all: a GPIO its pin table names,
+  // or the on-die channel when caps.adc reports it. Everything else would be
+  // answered "board has no GPn" at cfg time.
+  isOffered(n: number): boolean {
+    return n < NUM ? this.hasCap(n, C_DIGITAL) : this.hasCap(n, C_ADC);
+  }
+
+  // Whether pin n is real on this board. A slot index past the GPIOs (the temp
+  // channel) is not addressable, because it is not a pin the lanes can be handed.
   isAddressable(n: number): boolean {
-    if (!Number.isInteger(n) || n < 0 || n >= NUM) return false;
-    return this.gpSet ? this.gpSet.has(n) : true;
+    return n < NUM && this.hasCap(n, C_DIGITAL);
   }
 
   // Drivers call this after any user-facing config mutation so the store
@@ -169,45 +266,39 @@ export class PinModel extends Emitter {
   }
 
   setCaps(caps: any): void {
-    const gp = Array.isArray(caps?.gp)
-      ? caps.gp.map(Number).filter((n: number) => Number.isInteger(n) && n >= 0 && n < NUM)
-      : null;
-    const pins = Number(caps?.pins) > 0 ? Number(caps.pins) : 0;
+    const nums = (v: any): number[] | null =>
+      Array.isArray(v) ? v.map(Number).filter((n: number) => Number.isInteger(n)) : null;
+    const gp = nums(caps?.gp)?.filter((n: number) => n >= 0 && n < NUM) ?? null;
     // A board table with holes cannot be described by a count, so caps.gp wins
     // when the firmware sends it; an older one that only says how many pins it
     // swept still gets the contiguous set it swept.
-    this.gpSet = gp
-      ? new Set(gp)
-      : pins > 0
-        ? new Set(Array.from({ length: Math.min(pins, NUM) }, (_, i) => i))
-        : null;
-    this.pwmCaps = Array.isArray(caps?.pwm) ? caps.pwm.map(Number) : null;
-    this.adcCaps = Array.isArray(caps?.adc) ? caps.adc.map(Number) : null;
+    const pins = Number(caps?.pins) > 0 ? Number(caps.pins) : 0;
+    const pwm = nums(caps?.pwm);
+    const adc = nums(caps?.adc);
+
+    // Ordered pair tables — these are facts about two pins at once, so they stay
+    // beside the bits rather than inside them.
     const pairs = Array.isArray(caps?.i2c_pairs) ? caps.i2c_pairs : null;
+    this.i2cPairs = null;
+    let i2cRoles: { scl: Set<number>; sda: Set<number> } | null = null;
     if (pairs) {
       this.i2cPairs = new Set<string>();
-      this.i2cSclPins = new Set<number>();
-      this.i2cSdaPins = new Set<number>();
+      i2cRoles = { scl: new Set<number>(), sda: new Set<number>() };
       for (const p of pairs) {
         if (!Array.isArray(p) || p.length < 2) continue;
         const scl = Number(p[0]);
         const sda = Number(p[1]);
         if (!Number.isInteger(scl) || !Number.isInteger(sda)) continue;
         this.i2cPairs.add(scl + ":" + sda);
-        this.i2cSclPins.add(scl);
-        this.i2cSdaPins.add(sda);
+        i2cRoles.scl.add(scl);
+        i2cRoles.sda.add(sda);
       }
-    } else {
-      this.i2cPairs = null;
-      this.i2cSclPins = null;
-      this.i2cSdaPins = null;
     }
     const u = caps?.uart;
-    const utx = Array.isArray(u?.tx) ? u.tx.map(Number) : null;
-    const urx = Array.isArray(u?.rx) ? u.rx.map(Number) : null;
+    const utx = nums(u?.tx);
+    const urx = nums(u?.rx);
     const upairs = Array.isArray(u?.pairs) ? u.pairs : null;
-    this.uartTxPins = utx ? new Set(utx.filter(Number.isInteger)) : null;
-    this.uartRxPins = urx ? new Set(urx.filter(Number.isInteger)) : null;
+    this.uartPairs = null;
     if (upairs) {
       this.uartPairs = new Set<string>();
       for (const p of upairs) {
@@ -217,28 +308,41 @@ export class PinModel extends Emitter {
         if (!Number.isInteger(tx) || !Number.isInteger(rx)) continue;
         this.uartPairs.add(tx + ":" + rx);
       }
-    } else {
-      this.uartPairs = null;
     }
     const sp = caps?.spi;
     const sgroups = Array.isArray(sp?.groups) ? sp.groups : null;
+    let spiGroups: SpiGroupSet[] | null = null;
     if (sgroups) {
-      this.spiGroups = [];
+      spiGroups = [];
       for (const g of sgroups) {
         if (!g || !Array.isArray(g.sck)) continue;
-        this.spiGroups.push({
+        spiGroups.push({
           sck: new Set<number>(g.sck.map(Number)),
           mosi: new Set<number>((Array.isArray(g.mosi) ? g.mosi : []).map(Number)),
           miso: new Set<number>((Array.isArray(g.miso) ? g.miso : []).map(Number)),
         });
       }
-      if (!this.spiGroups.length) this.spiGroups = null;
-    } else {
-      this.spiGroups = null;
+      if (!spiGroups.length) spiGroups = null;
     }
+    this.spiGroups = spiGroups;
     this.spiMaxCs = Number(sp?.max_cs) > 0 ? Number(sp.max_cs) : 4;
     this.spiMaxBuses = Number(sp?.max_buses) > 0 ? Number(sp.max_buses) : 2;
     this.spiCeiling = Number(sp?.baud_ceiling) > 0 ? Number(sp.baud_ceiling) : 0;
+
+    // One place turns the message into truth for every view; see buildCaps.
+    this.cap = buildCaps({
+      gp,
+      pins,
+      pwm,
+      adc,
+      i2c: i2cRoles,
+      uart: utx || urx ? { tx: new Set(utx ?? []), rx: new Set(urx ?? []) } : null,
+      spi: spiGroups,
+    });
+    this.knownPwm = pwm !== null;
+    this.knownI2c = pairs !== null;
+    this.knownUart = utx !== null || urx !== null;
+    this.knownSpi = spiGroups !== null;
   }
 
   // Public caps reads for the SPI lane: how many CS slots to draw, how many buses
@@ -258,7 +362,7 @@ export class PinModel extends Emitter {
   }
 
   get capsKnown(): boolean {
-    return this.pwmCaps !== null;
+    return this.knownPwm;
   }
 
   // A persisted binding may name a pin or a pair the firmware now connected
@@ -281,10 +385,8 @@ export class PinModel extends Emitter {
       dropped.push({ pin: n, role });
     };
     for (let n = 0; n < SLOTS; n++) {
-      const role = this.roles[n];
-      if (role === R_PWM && !this.pwmCap(n)) dropPin(n);
-      else if (role === R_ADC && !this.adcCap(n)) dropPin(n);
-      else if (n === TEMP && role !== 0 && role !== R_ADC) dropPin(n);
+      const bit = ROLE_BIT[this.roles[n]];
+      if (bit !== undefined && !this.hasCap(n, bit)) dropPin(n);
     }
     // Half a bus stays half a bus: only the offending line is released, so the
     // card survives and the user can drop in a legal partner.
@@ -350,32 +452,27 @@ export class PinModel extends Emitter {
   // True once the firmware has reported the I2C pair table, so the UI can show
   // SCL/SDA badges; before that the predicates are permissive but silent.
   get i2cPairKnown(): boolean {
-    return this.i2cPairs !== null;
+    return this.knownI2c;
   }
 
   // Whether the firmware handed us the SPI pin groups. Without them a badge would
   // be a guess, so the chip shows nothing rather than claiming a role.
+  // (Legality is still permissive, because the bits were built with no group table.)
   get spiKnown(): boolean {
-    return this.spiGroups !== null;
+    return this.knownSpi;
   }
 
-  pwmCap(n: number): boolean {
-    if (n === TEMP) return false; // the temperature sensor is not a PWM pin
-    return !this.pwmCaps || this.pwmCaps.includes(n);
-  }
-
-  adcCap(n: number): boolean {
-    const w = toWire(n); // caps are reported as wire ids (temp = 100)
-    return !this.adcCaps || this.adcCaps.includes(w);
+  // Whether this ADC channel is an on-die one (the temperature sensor): no pin
+  // voltage to show, so the lane skips the volts half of its unit cycle.
+  adcOnDie(n: number): boolean {
+    return this.hasCap(n, C_ONDIE);
   }
 
   // Whether pin n can serve as the SCL (or SDA) line of some legal I2C pair.
   // Unknown caps → permissive (accept any GP); the device still rejects an
   // illegal pair authoritatively at cfg time.
   i2cRoleCap(n: number, role: "scl" | "sda"): boolean {
-    if (!this.isAddressable(n)) return false; // not on this board's pin table
-    const set = role === "scl" ? this.i2cSclPins : this.i2cSdaPins;
-    return !set || set.has(n);
+    return this.hasCap(n, role === "scl" ? C_SCL : C_SDA);
   }
 
   // Whether the ordered (scl, sda) pair is a legal bus. Unknown caps → permissive.
@@ -397,15 +494,13 @@ export class PinModel extends Emitter {
 
   // —— UART predicates ——
   get uartKnown(): boolean {
-    return this.uartTxPins !== null || this.uartRxPins !== null;
+    return this.knownUart;
   }
 
   // Whether pin n can serve as the TX (or RX) line of some UART. Unknown caps →
   // permissive; the device rejects an unroutable pin at cfg time.
   uartRoleCap(n: number, role: "tx" | "rx"): boolean {
-    if (!this.isAddressable(n)) return false; // not on this board's pin table
-    const set = role === "tx" ? this.uartTxPins : this.uartRxPins;
-    return !set || set.has(n);
+    return this.hasCap(n, role === "tx" ? C_TX : C_RX);
   }
 
   // Whether the ordered (tx, rx) pair lands on one UART instance. Unknown → permissive.
@@ -670,9 +765,8 @@ export class PinModel extends Emitter {
   // Whether pin n may ever carry this role. CS is the exception: the line is a
   // plain digital output on the firmware side, so any free GP can be one.
   spiRoleCap(n: number, role: SpiRole): boolean {
-    if (!this.isAddressable(n)) return false; // not on this board's pin table
-    if (!this.spiGroups || role === "cs") return true;
-    return this.spiGroups.some((g) => g[role].has(n));
+    if (role === "cs") return this.isAddressable(n);
+    return this.hasCap(n, SPI_BIT[role]);
   }
 
   // Index of the group that can route pin n in a data role, -1 if none. One group

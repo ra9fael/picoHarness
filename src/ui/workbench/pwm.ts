@@ -10,7 +10,7 @@
 // be wrong anyway — each pin has its own debounce timer; release stops the
 // output immediately.
 import { tf } from "../i18n";
-import { NUM, R_PWM, PWM_UNIT_AUTO, pinLabel, type PwmParam } from "../model/pins";
+import { C_PWM, NUM, R_PWM, PWM_UNIT_AUTO, pinLabel, type PwmParam } from "../model/pins";
 import { el, clamp } from "./dom";
 import { ICON } from "./icons";
 import type { FuncApi, FunctionDef } from "./types";
@@ -221,7 +221,7 @@ export function makePwmDef(drv: PwmDriver): FunctionDef {
     labelKey: "lane_pwm",
     cls: "l-pwm",
     icon: ICON[R_PWM],
-    accept: (api, n) => api.model.pwmCap(n),
+    accept: (api, n) => api.model.hasCap(n, C_PWM),
     assign: (api, n) => {
       if (!api.model.pwm[n]) api.model.pwm[n] = { freq: 1000, duty: 50 };
       drv.schedule(n);
