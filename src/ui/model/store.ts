@@ -3,7 +3,7 @@
 // through the normal gpio.cfg sendNow + pwm drift-reconciliation path once
 // the link becomes ready, so no restore-time commands are needed here.
 import type { PinModel } from "./pins";
-import { SLOTS, R_PWM, R_ADC, R_I2C, R_UART, PWM_UNIT_AUTO } from "./pins";
+import { SLOTS, R_PWM, R_ADC, R_I2C, R_UART, R_SPI, PWM_UNIT_AUTO } from "./pins";
 
 const KEY = "picoharness-config-v1";
 
@@ -19,14 +19,29 @@ export type PinSnap = {
 
 export type BusSnap = { id: number; sda: number; scl: number; freq: number };
 export type UartSnap = { id: number; tx: number; rx: number; baud: number };
+export type SpiSnap = {
+  id: number;
+  sck: number;
+  mosi: number;
+  miso: number;
+  cs: number[];
+  baud: number;
+  mode: number;
+};
 
-export type Snapshot = { v: number; pins: PinSnap[]; buses: BusSnap[]; uarts: UartSnap[] };
+export type Snapshot = {
+  v: number;
+  pins: PinSnap[];
+  buses: BusSnap[];
+  uarts: UartSnap[];
+  spis: SpiSnap[];
+};
 
 export function snapshotOf(model: PinModel): Snapshot {
   const pins: PinSnap[] = [];
   for (let n = 0; n < SLOTS; n++) {
     const r = model.roles[n];
-    if (!r || r === R_I2C || r === R_UART) continue; // bus pins are reconstructed from `buses`/`uarts`
+    if (!r || r === R_I2C || r === R_UART || r === R_SPI) continue; // bus pins are reconstructed from `buses`/`uarts`/`spis`
     const s: PinSnap = { n, r, p: model.pulls[n] };
     const pw = model.pwm[n];
     if (r === R_PWM && pw) {
@@ -39,7 +54,8 @@ export function snapshotOf(model: PinModel): Snapshot {
   }
   const buses: BusSnap[] = model.buses.map((b) => ({ ...b }));
   const uarts: UartSnap[] = model.uartBuses.map((b) => ({ ...b }));
-  return { v: 1, pins, buses, uarts };
+  const spis: SpiSnap[] = model.spiBuses.map((b) => ({ ...b, cs: [...b.cs] }));
+  return { v: 1, pins, buses, uarts, spis };
 }
 
 export function saveConfig(model: PinModel): void {
@@ -61,6 +77,8 @@ function applySnapshot(model: PinModel, obj: any): number {
   model.pinBus.fill(-1);
   model.uartBuses = [];
   model.uartPinBus.fill(-1);
+  model.spiBuses = [];
+  model.spiPinBus.fill(-1);
   let count = 0;
   for (const s of obj.pins) {
     if (typeof s?.n !== "number" || s.n < 0 || s.n >= SLOTS || !Number.isInteger(s.n)) continue;
@@ -110,6 +128,29 @@ function applySnapshot(model: PinModel, obj: any): number {
       count++;
     }
   }
+  // Rebuild SPI buses the same way. Half buses (no MOSI or no MISO) are legal, so
+  // bind each data slot independently; CS arrives as a dense list and is added by
+  // index. The caps prune runs after this, so a file from a different board is
+  // dropped pin by pin rather than trusted.
+  if (Array.isArray(obj.spis)) {
+    for (const b of obj.spis) {
+      if (typeof b?.id !== "number" || !Number.isInteger(b.id)) continue;
+      const nb = model.addSpiBus();
+      nb.id = b.id;
+      model.adoptSpiBusId(b.id);
+      nb.baud = typeof b.baud === "number" && b.baud > 0 ? b.baud : 1000000;
+      nb.mode = typeof b.mode === "number" && b.mode >= 0 && b.mode <= 3 ? b.mode : 0;
+      const inRange = (v: any): v is number =>
+        typeof v === "number" && Number.isInteger(v) && v >= 0 && v < SLOTS;
+      for (const role of ["sck", "mosi", "miso"] as const)
+        if (inRange(b[role])) model.setSpiSlot(nb.id, role, b[role]);
+      if (Array.isArray(b.cs))
+        (b.cs as any[]).forEach((c: any, i: number) => {
+          if (inRange(c)) model.setSpiCs(nb.id, i, c);
+        });
+      count++;
+    }
+  }
   return count;
 }
 
@@ -145,5 +186,5 @@ export function clearStored(): void {
 }
 
 export function blankConfig(model: PinModel): void {
-  applySnapshot(model, { pins: [], buses: [], uarts: [] });
+  applySnapshot(model, { pins: [], buses: [], uarts: [], spis: [] });
 }

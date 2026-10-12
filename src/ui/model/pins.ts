@@ -6,7 +6,7 @@ import { Emitter } from "../core/events";
 import type { JsonMsg } from "../types";
 
 export const NUM = 29; // GP0..GP28, matching firmware NUM_PINS
-export const R_IN = 1, R_OUT = 2, R_PWM = 3, R_ADC = 4, R_I2C = 5, R_UART = 6;
+export const R_IN = 1, R_OUT = 2, R_PWM = 3, R_ADC = 4, R_I2C = 5, R_UART = 6, R_SPI = 7;
 
 // An I2C bus is a multi-pin function: it owns a named PAIR of pins (sda/scl
 // hold model slot indices, -1 = unassigned) plus a clock rate. Bus instances
@@ -20,6 +20,26 @@ export type I2cBus = { id: number; sda: number; scl: number; freq: number };
 // back-pointer. rp2 hardware UART pins are fixed, so full-duplex (tx,rx) pairs
 // are constrained — see uartPairs.
 export type UartBus = { id: number; tx: number; rx: number; baud: number };
+
+// SPI is the third multi-pin bus and the widest one: SCK plus at least one of
+// MOSI/MISO (the port refuses a bare SCK), and up to caps.spi.max_cs chip-select
+// lines that are plain outputs, not part of the peripheral. A bus is "complete"
+// when SCK and one data line are bound. Its pins carry roles[]=R_SPI and a
+// spiPinBus back-pointer. rp2 routes each SPI peripheral from fixed pin GROUPS,
+// so every member has to come from the same group — see spiSlotOk.
+export type SpiBus = {
+  id: number;
+  sck: number;
+  mosi: number;
+  miso: number;
+  cs: number[];
+  baud: number;
+  mode: number; // 0..3 = CPOL/CPHA
+};
+
+export type SpiRole = "sck" | "mosi" | "miso" | "cs";
+export type SpiDataRole = "sck" | "mosi" | "miso";
+type SpiGroupSet = { sck: Set<number>; mosi: Set<number>; miso: Set<number> };
 
 // The on-die temperature sensor is a virtual ADC channel: it occupies one extra
 // model slot (index TEMP) but travels on the wire as pin TEMP_PIN, matching the
@@ -62,6 +82,9 @@ export class PinModel extends Emitter {
   uartBuses: UartBus[] = []; // UART bus instances (tx and/or rx)
   uartPinBus = new Int16Array(SLOTS).fill(-1); // slot -> owning uart id, -1 = not in a uart
   private uartBusSeq = 0; // monotonic source of uart ids
+  spiBuses: SpiBus[] = []; // SPI bus instances (sck + mosi/miso + cs lines)
+  spiPinBus = new Int16Array(SLOTS).fill(-1); // slot -> owning spi id, -1 = not in a spi
+  private spiBusSeq = 0; // monotonic source of spi ids
   private pwmCaps: number[] | null = null; // firmware caps.pwm; null = unknown
   private adcCaps: number[] | null = null;
   // rp2 PIO I2C legality is a property of the ORDERED (scl, sda) pair, not of
@@ -81,6 +104,15 @@ export class PinModel extends Emitter {
   private uartTxPins: Set<number> | null = null;
   private uartRxPins: Set<number> | null = null;
   private uartPairs: Set<string> | null = null;
+  // rp2 SPI routes each peripheral from fixed pin GROUPS: SCK, MOSI and MISO all
+  // have to come from one entry of caps.spi.groups, and one group means one
+  // peripheral, so caps.spi.max_buses groups is how many SPI cards can be live at
+  // once. CS lines are outside the peripheral (plain outputs) and may be any free
+  // GP. Caps not known (caps.spi absent) → permissive, and the device rejects.
+  private spiGroups: SpiGroupSet[] | null = null;
+  private spiMaxCs = 4;
+  private spiMaxBuses = 2;
+  private spiCeiling = 0; // 0 = unknown
 
   // Drivers call this after any user-facing config mutation so the store
   // can coalesce saves; "levels" is only about live pin values.
@@ -128,6 +160,41 @@ export class PinModel extends Emitter {
     } else {
       this.uartPairs = null;
     }
+    const sp = caps?.spi;
+    const sgroups = Array.isArray(sp?.groups) ? sp.groups : null;
+    if (sgroups) {
+      this.spiGroups = [];
+      for (const g of sgroups) {
+        if (!g || !Array.isArray(g.sck)) continue;
+        this.spiGroups.push({
+          sck: new Set<number>(g.sck.map(Number)),
+          mosi: new Set<number>((Array.isArray(g.mosi) ? g.mosi : []).map(Number)),
+          miso: new Set<number>((Array.isArray(g.miso) ? g.miso : []).map(Number)),
+        });
+      }
+      if (!this.spiGroups.length) this.spiGroups = null;
+    } else {
+      this.spiGroups = null;
+    }
+    this.spiMaxCs = Number(sp?.max_cs) > 0 ? Number(sp.max_cs) : 4;
+    this.spiMaxBuses = Number(sp?.max_buses) > 0 ? Number(sp.max_buses) : 2;
+    this.spiCeiling = Number(sp?.baud_ceiling) > 0 ? Number(sp.baud_ceiling) : 0;
+  }
+
+  // Public caps reads for the SPI lane: how many CS slots to draw, how many buses
+  // may be live, and the highest clock the port can produce.
+  get spiCsLimit(): number {
+    return this.spiMaxCs;
+  }
+
+  get spiBusLimit(): number {
+    return this.spiMaxBuses;
+  }
+
+  // 0 = unknown (older firmware), so the caller falls back to its own preset list
+  // instead of capping the input at nothing.
+  get spiCeilingHz(): number {
+    return this.spiCeiling;
   }
 
   get capsKnown(): boolean {
@@ -150,6 +217,7 @@ export class PinModel extends Emitter {
       this.roles[n] = 0;
       this.pinBus[n] = -1;
       this.uartPinBus[n] = -1;
+      this.spiPinBus[n] = -1;
       dropped.push({ pin: n, role });
     };
     for (let n = 0; n < SLOTS; n++) {
@@ -174,6 +242,23 @@ export class PinModel extends Emitter {
       if (b.tx >= 0 && b.rx >= 0 && !this.uartPairOk(b.tx, b.rx))
         this.releaseUartLine(b.id, "rx", dropped);
     }
+    for (const b of this.spiBuses) {
+      if (b.sck >= 0 && !this.spiRoleCap(b.sck, "sck")) this.releaseSpiLine(b.id, "sck", dropped);
+      if (b.mosi >= 0 && !this.spiRoleCap(b.mosi, "mosi")) this.releaseSpiLine(b.id, "mosi", dropped);
+      if (b.miso >= 0 && !this.spiRoleCap(b.miso, "miso")) this.releaseSpiLine(b.id, "miso", dropped);
+      // A set that spans two groups loses MISO first: a write-only bus is still a
+      // bus, and SCK is the pin the card is organised around.
+      if (!this.spiSetOk(b.sck, b.mosi, b.miso)) {
+        if (b.miso >= 0) this.releaseSpiLine(b.id, "miso", dropped);
+        else if (b.mosi >= 0) this.releaseSpiLine(b.id, "mosi", dropped);
+      }
+      // An older config may carry more CS lines than this board's firmware allows.
+      while (b.cs.length > this.spiCsLimit) {
+        const pin = b.cs[b.cs.length - 1];
+        this.removeSpiCs(b.id, b.cs.length - 1);
+        dropped.push({ pin, role: R_SPI });
+      }
+    }
     if (dropped.length) this.emit("config");
     return dropped;
   }
@@ -192,6 +277,14 @@ export class PinModel extends Emitter {
     if (pin < 0) return;
     this.setUartSlot(busId, which, -1);
     into.push({ pin, role: R_UART });
+  }
+
+  private releaseSpiLine(busId: number, which: SpiDataRole, into: { pin: number; role: number }[]): void {
+    const b = this.busSpiById(busId);
+    const pin = b ? b[which] : -1;
+    if (pin < 0) return;
+    this.setSpiSlot(busId, which, -1);
+    into.push({ pin, role: R_SPI });
   }
 
   // True once the firmware has reported the I2C pair table, so the UI can show
@@ -479,6 +572,180 @@ export class PinModel extends Emitter {
     return b.sda >= 0 && b.scl >= 0;
   }
 
+  // —— SPI bus instances ——
+  // SCK plus at least one data line makes a bus live on the device: the rp2 port
+  // refuses a bare SCK, but a MOSI-less or MISO-less bus builds and runs, so a
+  // half bus counts as complete.
+  spiComplete(b: SpiBus): boolean {
+    return b.sck >= 0 && (b.mosi >= 0 || b.miso >= 0);
+  }
+
+  busSpiById(id: number): SpiBus | undefined {
+    return this.spiBuses.find((b) => b.id === id);
+  }
+
+  addSpiBus(): SpiBus {
+    const b: SpiBus = { id: this.spiBusSeq++, sck: -1, mosi: -1, miso: -1, cs: [], baud: 1000000, mode: 0 };
+    this.spiBuses.push(b);
+    return b;
+  }
+
+  adoptSpiBusId(id: number): void {
+    if (id >= this.spiBusSeq) this.spiBusSeq = id + 1;
+  }
+
+  spiBusOf(n: number): SpiBus | undefined {
+    const id = this.spiPinBus[n];
+    return id >= 0 ? this.busSpiById(id) : undefined;
+  }
+
+  // Whether pin n may ever carry this role. CS is the exception: the line is a
+  // plain digital output on the firmware side, so any free GP can be one.
+  spiRoleCap(n: number, role: SpiRole): boolean {
+    if (n === TEMP || n < 0 || n >= NUM) return false;
+    if (!this.spiGroups || role === "cs") return true;
+    return this.spiGroups.some((g) => g[role].has(n));
+  }
+
+  // Index of the group that can route pin n in a data role, -1 if none. One group
+  // is one peripheral, so this is also what two buses may not share.
+  private spiGroupIdx(n: number, role: SpiDataRole): number {
+    if (!this.spiGroups) return -1;
+    return this.spiGroups.findIndex((g) => g[role].has(n));
+  }
+
+  // Whether the bound data pins all come from one group. Unknown caps → permissive.
+  spiSetOk(sck: number, mosi: number, miso: number): boolean {
+    if (!this.spiGroups) return true;
+    let gid = -2;
+    const lines: [SpiDataRole, number][] = [["sck", sck], ["mosi", mosi], ["miso", miso]];
+    for (const [role, n] of lines) {
+      if (n < 0) continue;
+      const g = this.spiGroupIdx(n, role);
+      if (g < 0) return false;
+      if (gid === -2) gid = g;
+      else if (g !== gid) return false;
+    }
+    return true;
+  }
+
+  // Pin n may enter this slot of `bus`: role-capable, not already playing another
+  // role in the same bus, still inside the CS budget, and (for a data pin) leaving
+  // the bus inside one pin group.
+  spiSlotOk(bus: SpiBus, role: SpiRole, n: number): boolean {
+    if (!this.spiRoleCap(n, role)) return false;
+    const cand: SpiBus = { ...bus, cs: bus.cs.slice() };
+    if (role === "cs") {
+      if (cand.cs.length >= this.spiCsLimit) return false;
+      cand.cs.push(n);
+    } else {
+      if (cand[role] === n) return true; // re-binding the pin it already holds
+      cand[role] = n;
+    }
+    const members = [cand.sck, cand.mosi, cand.miso, ...cand.cs];
+    if (members.indexOf(n) !== members.lastIndexOf(n)) return false; // one pin, one role
+    return this.spiSetOk(cand.sck, cand.mosi, cand.miso);
+  }
+
+  // Bind a data pin into a spi slot; mirrors setUartSlot but for sck/mosi/miso and
+  // the spiPinBus back-pointer + R_SPI role.
+  setSpiSlot(busId: number, role: SpiDataRole, pin: number): void {
+    const b = this.busSpiById(busId);
+    if (!b) return;
+    const prev = b[role];
+    if (prev >= 0 && prev !== pin) {
+      this.roles[prev] = 0;
+      this.spiPinBus[prev] = -1;
+    }
+    if (pin >= 0) {
+      const other = this.spiPinBus[pin];
+      if (other >= 0 && other !== busId) this.detachSpiPin(other, pin);
+      this.roles[pin] = R_SPI;
+      this.spiPinBus[pin] = busId;
+      b[role] = pin;
+    } else {
+      b[role] = -1;
+    }
+    this.changed();
+  }
+
+  // Add or replace one CS line. index === cs.length appends (the lane draws a
+  // fixed row of slots and fills them left to right).
+  setSpiCs(busId: number, index: number, pin: number): void {
+    const b = this.busSpiById(busId);
+    if (!b || index < 0) return;
+    if (pin < 0) {
+      this.removeSpiCs(busId, index);
+      return;
+    }
+    if (index >= b.cs.length && b.cs.length >= this.spiCsLimit) return;
+    const prev = b.cs[index];
+    if (prev === pin) return;
+    if (prev >= 0) {
+      this.roles[prev] = 0;
+      this.spiPinBus[prev] = -1;
+    }
+    const other = this.spiPinBus[pin];
+    if (other >= 0 && other !== busId) this.detachSpiPin(other, pin);
+    this.roles[pin] = R_SPI;
+    this.spiPinBus[pin] = busId;
+    b.cs[index] = pin;
+    this.changed();
+  }
+
+  removeSpiCs(busId: number, index: number): void {
+    const b = this.busSpiById(busId);
+    if (!b || index < 0 || index >= b.cs.length) return;
+    const pin = b.cs[index];
+    b.cs.splice(index, 1);
+    if (pin >= 0) {
+      this.roles[pin] = 0;
+      this.spiPinBus[pin] = -1;
+    }
+    this.changed();
+  }
+
+  // Take pin out of whatever other spi bus holds it (one pin, one function).
+  private detachSpiPin(busId: number, pin: number): void {
+    const ob = this.busSpiById(busId);
+    if (!ob) return;
+    for (const role of ["sck", "mosi", "miso"] as SpiDataRole[])
+      if (ob[role] === pin) ob[role] = -1;
+    const i = ob.cs.indexOf(pin);
+    if (i >= 0) ob.cs.splice(i, 1);
+  }
+
+  removeSpiBus(id: number): void {
+    const b = this.busSpiById(id);
+    if (!b) return;
+    for (const p of [b.sck, b.mosi, b.miso, ...b.cs]) {
+      if (p >= 0) {
+        this.roles[p] = 0;
+        this.spiPinBus[p] = -1;
+      }
+    }
+    this.spiBuses = this.spiBuses.filter((x) => x.id !== id);
+    this.changed();
+  }
+
+  spiMask(): number {
+    let m = 0;
+    for (const b of this.spiBuses) {
+      if (!this.spiComplete(b)) continue;
+      for (const p of [b.sck, b.mosi, b.miso, ...b.cs]) if (p >= 0) m |= 1 << p;
+    }
+    return m;
+  }
+
+  // CS lines are joined with "+" so a list can never be read as two fields.
+  spiSig(): string {
+    return this.spiBuses
+      .filter((b) => this.spiComplete(b))
+      .map((b) => `${b.id}:${b.sck},${b.mosi},${b.miso},${b.cs.join("+")},${b.baud},${b.mode}`)
+      .sort()
+      .join(";");
+  }
+
   // Edge-pushed input levels / ADC batches from firmware.
   applyEvent(m: JsonMsg): void {
     if (m.evt === "adc" && m.vals) {
@@ -521,13 +788,27 @@ export class PinModel extends Emitter {
   applyState(
     d: any,
     fromCmd: boolean
-  ): { gpioDrift: boolean; pwmDrift: boolean; adcDrift: boolean; i2cDrift: boolean; uartDrift: boolean } {
+  ): {
+    gpioDrift: boolean;
+    pwmDrift: boolean;
+    adcDrift: boolean;
+    i2cDrift: boolean;
+    uartDrift: boolean;
+    spiDrift: boolean;
+  } {
     this.devIn = d.in >>> 0;
     this.devOut = d.out >>> 0;
     this.devPwm = (d.cfg_pwm ?? 0) >>> 0;
     this.emit("levels");
-    if (fromCmd)
-      return { gpioDrift: false, pwmDrift: false, adcDrift: false, i2cDrift: false, uartDrift: false };
+    const none = {
+      gpioDrift: false,
+      pwmDrift: false,
+      adcDrift: false,
+      i2cDrift: false,
+      uartDrift: false,
+      spiDrift: false,
+    };
+    if (fromCmd) return none;
     const w = this.cfgMasks();
     const gpioDrift =
       d.cfg_in !== w.in || d.cfg_out !== w.out ||
@@ -549,6 +830,13 @@ export class PinModel extends Emitter {
           .join(";")
       : "";
     const uartDrift = devUartSig !== this.uartSig();
-    return { gpioDrift, pwmDrift, adcDrift, i2cDrift, uartDrift };
+    const devSpiSig = Array.isArray(d.spi)
+      ? d.spi
+          .map((x: any) => `${x.id}:${x.sck},${x.mosi},${x.miso},${(x.cs ?? []).join("+")},${x.baud},${x.mode}`)
+          .sort()
+          .join(";")
+      : "";
+    const spiDrift = devSpiSig !== this.spiSig();
+    return { gpioDrift, pwmDrift, adcDrift, i2cDrift, uartDrift, spiDrift };
   }
 }
