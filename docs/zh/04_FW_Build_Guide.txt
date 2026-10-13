@@ -106,6 +106,8 @@ npm run build 走的是 esbuild，它只做打包，不做类型检查。改过 
    认口/日志口/REPL 这类端口逻辑可以用假 navigator.serial（两个内存 FakePort，
    一个答 ping 一个只答 REPL）在无设备环境下跑完整条链路。
    测试结束记得清 localStorage（key：picoharness-config-v1、picoharness-scope-v1）。
+4. 改过 README 或 docs/ 下任何 .md：npm run docs:check。它按 GitHub 的标题 slug 规则解析每个
+   相对链接和 #锚点，死链不为零就非零退出——发版前必须过这一条。
 
 [排障判据]
 

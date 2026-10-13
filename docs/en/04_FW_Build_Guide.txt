@@ -121,6 +121,9 @@ After changing the UI, do these in order:
    navigator.serial: two in-memory FakePorts, one answering pings and one answering only the
    REPL, covers the whole chain without hardware.
    Clear localStorage when the test ends (keys: picoharness-config-v1, picoharness-scope-v1).
+4. If any .md in README or docs/ changed: npm run docs:check. It resolves every relative link
+   and #anchor against GitHub's heading-slug rule and exits non-zero on a dead target — this one
+   has to pass before a release.
 
 [Troubleshooting criteria]
 
