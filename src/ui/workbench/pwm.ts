@@ -334,7 +334,9 @@ function makeErrEl(drv: PwmDriver, n: number): HTMLElement {
 }
 
 function dutyIn(api: FuncApi, n: number, p: PwmParam): HTMLElement {
-  const i = el("pwm-in", "input") as HTMLInputElement;
+  // pwm-duty, not just pwm-in: the duty box holds 0..100 while the frequency box has to
+  // show what the generator really produces (0.0174553), so the two cannot share a width.
+  const i = el("pwm-in pwm-duty", "input") as HTMLInputElement;
   i.type = "number";
   i.min = "0"; i.max = "100"; i.step = "1"; i.value = String(p.duty);
   i.title = "%";
@@ -368,9 +370,14 @@ export function makePwmDef(drv: PwmDriver): FunctionDef {
         return e;
       };
       const be = makeBackendCtl(drv, api, n, p);
+      // The three number controls travel as one group: the lane is narrower than the
+      // whole row of parts, and when the chip has to break, a frequency box separated
+      // from its unit and duty boxes reads as three unrelated fields.
+      const edit = el("pwm-edit", "span");
+      edit.append(...makeFreqCtl(drv, api, n, p), dutyIn(api, n, p), u("%"));
       const els: HTMLElement[] = [];
       if (be) els.push(be);
-      els.push(...makeFreqCtl(drv, api, n, p), dutyIn(api, n, p), u("%"), makeErrEl(drv, n));
+      els.push(edit, makeErrEl(drv, n));
       return { els };
     },
   };

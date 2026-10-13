@@ -158,8 +158,16 @@ main { padding: 16px; }
   padding: 1px 4px;
 }
 .chip .pwm-in.hwdev { color: var(--warn); border-color: var(--warn); }
+/* The PWM chip carries six controls in a row the lane only just fits, so everything
+   that holds a short number is cut to its content: duty is 0..100, the unit pick is
+   at most "MHz". The frequency box keeps its 64px — PIO reports hundredths of a hertz.
+   Tight gaps plus the .pwm-edit group mean a chip that does not fit breaks between the
+   generator pick and the number fields, not between a number and its unit. */
+.l-pwm .chip { gap: 2px; flex-wrap: wrap; padding-left: 5px; padding-right: 5px; }
+.pwm-edit { display: inline-flex; align-items: center; gap: 2px; }
+.chip .pwm-duty { width: 40px; }
 .chip .pwm-sel {
-  width: 62px;
+  width: 48px;
   background: #10161b;
   border: 1px solid var(--border);
   color: var(--fg);
@@ -198,16 +206,20 @@ main { padding: 16px; }
   border-right: 1px solid var(--border);
   color: var(--dim);
   font: 10px var(--mono);
-  padding: 1px 5px;
+  padding: 1px 4px;
 }
 .chip .pwm-be-btn:last-child { border-right: 0; }
 .chip .pwm-be-btn:hover { color: var(--accent); }
 .chip .pwm-be-btn.on { background: var(--accent); color: var(--bg); }
-/* The firmware's own refusal for this channel, kept next to the pin it names. */
+/* The firmware's own refusal for this channel, kept next to the pin it names. It gets
+   its own line inside the chip: the longest message would otherwise widen the chip past
+   the lane again, which is the whole thing this row of controls has to fit inside. */
 .pwm-err { display: none; }
 .chip .pwm-err.on {
   display: inline-block;
-  max-width: 170px;
+  order: 9;
+  flex: 1 1 100%;
+  max-width: 100%;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
