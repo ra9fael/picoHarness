@@ -79,6 +79,18 @@
       max_cs: 4,
       baud_ceiling: 75000000,
     },
+    // Mirrors the firmware's pio_caps() (tools/pio_bg_probe.py measured these on-board):
+    // every RP2350 GPIO has a PIO matrix, 12 state machines per chip, and the window
+    // below is what clk_min/clk_max over the counter limits work out to.
+    pwm_pio: {
+      pins: GPS.slice(),
+      max_sm: 12,
+      tick_cycles: 1,
+      fixed_cycles: 8,
+      counters: 65535,
+      clk_min: 2288,
+      clk_max: 150000000,
+    },
   };
 
   // The group a requested data-pin set belongs to, or null when it spans two (the
@@ -103,6 +115,55 @@
     return baud;
   }
 
+  // `1 << 32` wraps in JavaScript, so a mask wider than 31 slots is built with plain
+  // arithmetic -- the same reason the UI's setBit() exists.
+  function setBit(mask, n) {
+    return mask + 2 ** n;
+  }
+
+  function pioMask(p) {
+    var mask = 0;
+    Object.keys(p.pw).forEach(function (k) {
+      if (p.pw[k].be === "pio") mask = setBit(mask, Number(k));
+    });
+    return mask;
+  }
+
+  // read_state()'s PWM half, which the firmware sends with every pwm.* reply: cfg_pwm is
+  // the live channels and cfg_pio_pwm the subset the PIO generator owns. The UI reads both
+  // as "what the board is actually running", so omitting cfg_pwm would make a working
+  // slice look dead and the HW|PIO pick would never settle.
+  function pwmState(p) {
+    var cfg = 0;
+    Object.keys(p.pw).forEach(function (k) {
+      cfg = setBit(cfg, Number(k));
+    });
+    return {
+      cfg_pwm: cfg,
+      cfg_pio_pwm: pioMask(p),
+      pio_sm_free: CAPS.pwm_pio.max_sm - p.pioSm,
+      pwm: p.pw,
+    };
+  }
+
+  function pioSolve(freq, duty) {
+    var C = CAPS.pwm_pio;
+    var d = Math.max(Math.min(duty, 1), 0.0001);
+    if (d > 0.5) d = 1 - d; // the counters are symmetric: the wider phase sets the budget
+    var counts = Math.min(2 * C.counters, Math.floor(C.clk_max / freq) - C.fixed_cycles);
+    if (counts < 2)
+      return { error: "freq above PIO ceiling " + Math.floor(C.clk_max / (C.fixed_cycles + 2)) + " Hz" };
+    counts = Math.min(counts, Math.floor(C.counters / d));
+    var total = counts + C.fixed_cycles;
+    var clock = Math.floor(freq * total);
+    if (clock < C.clk_min)
+      return {
+        error: "clock " + clock + " Hz below PIO floor " + C.clk_min + " Hz: " + freq +
+          " Hz at duty " + duty + " is out of PIO range",
+      };
+    return { hfreq: clock / total };
+  }
+
   function makePort(name, isProtocol) {
     var p = {
       name: name,
@@ -110,7 +171,8 @@
       pending: [],
       ctrl: null,
       rx: "",
-      pw: {}, // slot -> {freq, hfreq, duty}, mirroring firmware read_state().pwm
+      pw: {}, // slot -> {freq, hfreq, duty, be}, mirroring firmware read_state().pwm
+      pioSm: 0, // state machines in use, the same budget the firmware counts
       spi: {}, // bus id -> {sck, mosi, miso, cs, baud, hbaud, mode}, ditto read_state().spi
       getInfo: function () {
         return { usbVendorId: 0x2e8a, usbProductId: 0x000b };
@@ -167,14 +229,10 @@
         if (!m || !m.cmd) return;
         if (m.cmd === "ping") return p.send({ id: m.id, ok: true, data: { pong: m.args.t } });
         if (m.cmd === "hello")
-          return p.send({ id: m.id, ok: true, data: { version: "0.1.15-mock", caps: CAPS } });
+          return p.send({ id: m.id, ok: true, data: { version: "0.1.18-mock", caps: CAPS } });
         if (m.cmd === "echo")
           return p.send({ id: m.id, ok: true, data: { msg: m.args.msg } });
         if (m.cmd === "gpio.state") {
-          var mask = 0;
-          Object.keys(p.pw).forEach(function (k) {
-            mask |= 1 << Number(k);
-          });
           var spiMask = 0;
           var spiList = [];
           Object.keys(p.spi).forEach(function (k) {
@@ -184,16 +242,11 @@
             });
             spiList.push(b);
           });
-          return p.send({
-            id: m.id,
-            ok: true,
-            data: {
-              cfg_in: 0, cfg_out: 0, out: 0, dev_in: 0,
-              cfg_pwm: mask, cfg_adc: 0, cfg_i2c: 0, cfg_uart: 0, cfg_spi: spiMask,
-              spi: spiList,
-              pwm: p.pw,
-            },
-          });
+          var data = pwmState(p);
+          data.cfg_in = 0; data.cfg_out = 0; data.out = 0; data.dev_in = 0;
+          data.cfg_adc = 0; data.cfg_i2c = 0; data.cfg_uart = 0;
+          data.cfg_spi = spiMask; data.spi = spiList;
+          return p.send({ id: m.id, ok: true, data: data });
         }
         // rp2 SPI: pins must come from one group, a bare SCK is refused, and the
         // clock is 150 MHz divided by an even integer (so requests above 75 MHz
@@ -252,19 +305,42 @@
           if (gone) delete p.spi[String(m.args.id)];
           return p.send({ id: m.id, ok: true, data: { released: !!gone } });
         }
-        // rp2 fixed-frequency PWMOut: whole hertz only, and the divider cannot
-        // go below 9 Hz (measured on GP25/GP2/GP12/GP0, CircuitPython 10.3.1),
-        // so hfreq is what the slice really generates.
+        // The two generators the firmware ships: the rp2 slice takes whole hertz only and
+        // cannot go below 9 Hz (measured on GP25/GP2/GP12/GP0, CircuitPython 10.3.1), and
+        // the PIO countdown reaches hundredths of a hertz at the price of one state
+        // machine. hfreq is always what the pin really generates, never the request.
         if (m.cmd === "pwm.cfg") {
-          if (m.args.freq < 1)
-            return p.send({ id: m.id, ok: false, error: "freq < 1 Hz: PWMOut takes whole hertz" });
-          var req = Math.floor(m.args.freq);
-          p.pw[String(m.args.pin)] = { freq: req, hfreq: req < 9 ? 9 : req, duty: m.args.duty };
-          return p.send({ id: m.id, ok: true, data: { pwm: p.pw } });
+          var be = m.args.backend || "hw";
+          var slot = String(m.args.pin);
+          var prev = p.pw[slot];
+          // owner[] says "pwm" straight through a switch, but one pad cannot hold two
+          // generators: the old one is torn down before the new one is armed.
+          if (prev && prev.be === "pio") p.pioSm--;
+          delete p.pw[slot];
+          if (be === "pio") {
+            if (p.pioSm >= CAPS.pwm_pio.max_sm)
+              return p.send({
+                id: m.id,
+                ok: false,
+                error: "no free PIO state machine (" + p.pioSm + "/" + CAPS.pwm_pio.max_sm + " in use)",
+              });
+            var sol = pioSolve(m.args.freq, m.args.duty);
+            if (sol.error) return p.send({ id: m.id, ok: false, error: sol.error });
+            p.pioSm++;
+            p.pw[slot] = { freq: m.args.freq, hfreq: sol.hfreq, duty: m.args.duty, be: "pio" };
+          } else {
+            if (m.args.freq < 1)
+              return p.send({ id: m.id, ok: false, error: "freq < 1 Hz: PWMOut takes whole hertz" });
+            var req = Math.floor(m.args.freq);
+            p.pw[slot] = { freq: req, hfreq: req < 9 ? 9 : req, duty: m.args.duty, be: "hw" };
+          }
+          return p.send({ id: m.id, ok: true, data: pwmState(p) });
         }
         if (m.cmd === "pwm.stop") {
+          var gone2 = p.pw[String(m.args.pin)];
+          if (gone2 && gone2.be === "pio") p.pioSm--;
           delete p.pw[String(m.args.pin)];
-          return p.send({ id: m.id, ok: true, data: { pwm: p.pw } });
+          return p.send({ id: m.id, ok: true, data: pwmState(p) });
         }
         p.send({ id: m.id, ok: false, error: "unknown cmd: " + m.cmd });
       },

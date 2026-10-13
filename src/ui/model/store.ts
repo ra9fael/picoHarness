@@ -14,6 +14,7 @@ export type PinSnap = {
   f?: number;
   d?: number;
   u?: number;
+  b?: number; // PWM generator: absent/0 = hardware slice, 1 = PIO state machine
   a?: number; // ADC display format: 0 V, 1 mV, 2 raw
 };
 
@@ -48,6 +49,9 @@ export function snapshotOf(model: PinModel): Snapshot {
       s.f = pw.freq;
       s.d = pw.duty;
       s.u = model.pwmUnit[n];
+      // Only the non-default generator is written: a file from before the PIO lane
+      // has no `b` and must still mean "hardware".
+      if (pw.backend === "pio") s.b = 1;
     }
     if (r === R_ADC) s.a = model.adcFmt[n];
     pins.push(s);
@@ -89,6 +93,7 @@ function applySnapshot(model: PinModel, obj: any): number {
       model.pwm[s.n] = {
         freq: s.f, // keep float — mHz entries like 500 mHz = 0.5 Hz must survive a round trip
         duty: typeof s.d === "number" ? Math.min(Math.max(s.d, 0), 100) : 50,
+        backend: s.b === 1 ? "pio" : "hw",
       };
       model.pwmUnit[s.n] = typeof s.u === "number" ? s.u : PWM_UNIT_AUTO;
     }

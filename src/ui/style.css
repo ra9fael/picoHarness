@@ -190,6 +190,31 @@ main { padding: 16px; }
 }
 .pwm-freq.open .pwm-presets { display: grid; }
 .pwm-presets button { padding: 2px 6px; font: 11px var(--mono); }
+/* HW|PIO generator pick: one flat segmented control, the chosen half filled in. */
+.pwm-be { display: inline-flex; align-items: center; border: 1px solid var(--border); }
+.chip .pwm-be-btn {
+  background: none;
+  border: 0;
+  border-right: 1px solid var(--border);
+  color: var(--dim);
+  font: 10px var(--mono);
+  padding: 1px 5px;
+}
+.chip .pwm-be-btn:last-child { border-right: 0; }
+.chip .pwm-be-btn:hover { color: var(--accent); }
+.chip .pwm-be-btn.on { background: var(--accent); color: var(--bg); }
+/* The firmware's own refusal for this channel, kept next to the pin it names. */
+.pwm-err { display: none; }
+.chip .pwm-err.on {
+  display: inline-block;
+  max-width: 170px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font: 10px var(--mono);
+  color: var(--err);
+  cursor: help;
+}
 .chip .unit { font: 10px var(--mono); color: var(--dim); }
 .chip .adc-val {
   width: 66px;

@@ -95,6 +95,12 @@ export const C_MISO = 1 << 10;
 // An ADC channel that is not a package pin: it has no pin voltage, so the lane
 // may not offer the volts/millivolts display.
 export const C_ONDIE = 1 << 11;
+// The slot can be driven by the PIO PWM generator instead of the hardware slice.
+// Unlike every other bit here this one is a FEATURE fact, not a legality guess: a
+// board that does not report caps.pwm_pio is a firmware that would answer
+// "unknown pwm backend", so the bit stays clear when the table is missing rather
+// than permissive.
+export const C_PWM_PIO = 1 << 12;
 
 const C_DIGITAL = C_IN | C_OUT;
 
@@ -108,6 +114,7 @@ type CapsInput = {
   gp: number[] | null; // the GPIOs this board can name, holes and all
   pins: number; // caps.pins: only used when the board predates caps.gp
   pwm: number[] | null;
+  pwmPio: number[] | null; // null = this firmware has no PIO generator at all
   adc: number[] | null; // wire ids, so the on-die channel arrives as TEMP_PIN
   i2c: { scl: Set<number>; sda: Set<number> } | null; // projected from i2c_pairs
   uart: { tx: Set<number>; rx: Set<number> } | null;
@@ -124,6 +131,7 @@ const NO_CAPS: CapsInput = {
   gp: null,
   pins: 0,
   pwm: null,
+  pwmPio: null,
   adc: null,
   i2c: null,
   uart: null,
@@ -136,6 +144,7 @@ const NO_CAPS: CapsInput = {
 function buildCaps(c: CapsInput): Uint16Array {
   const set = (l: number[] | null): Set<number> | null => (l ? new Set(l) : null);
   const pwm = set(c.pwm);
+  const pioPwm = set(c.pwmPio);
   const adc = set(c.adc);
   const table = new Uint16Array(SLOTS);
   for (let n = 0; n < NUM; n++) {
@@ -143,6 +152,7 @@ function buildCaps(c: CapsInput): Uint16Array {
     if (!named) continue; // the firmware would answer "board has no GPn"
     let b = C_DIGITAL;
     if (!pwm || pwm.has(n)) b |= C_PWM;
+    if (pioPwm && pioPwm.has(n)) b |= C_PWM_PIO;
     if (!adc || adc.has(n)) b |= C_ADC;
     if (!c.i2c || c.i2c.scl.has(n)) b |= C_SCL;
     if (!c.i2c || c.i2c.sda.has(n)) b |= C_SDA;
@@ -179,7 +189,28 @@ const wireMask = (v: unknown): number => (typeof v === "number" && Number.isFini
 // single-step jitter that otherwise makes the digits flicker every event.
 const ADC_ALPHA = 0.3;
 
-export type PwmParam = { freq: number; duty: number };
+export type PwmBackend = "hw" | "pio";
+
+// The window one PWM channel may be set to, per generator. `backend` is stored with the
+// channel because the two have different windows: the hardware slice cannot describe a
+// period below 1 Hz, while the PIO countdown's floor is a division of its own caps table.
+// The numbers are never typed into the UI -- pwmLimits() derives them from the device.
+export type PwmParam = { freq: number; duty: number; backend: PwmBackend };
+
+// caps.pwm_pio, kept verbatim (see the firmware's pio_caps(): it is the measured record of
+// what this chip's PIO can do, and the only source the PWM lane reads its window from).
+export type PwmPioCaps = {
+  max_sm: number;
+  fixed_cycles: number;
+  counters: number;
+  clk_min: number;
+  clk_max: number;
+};
+
+// The rp2 hardware PWMOut: whole-hertz divider, and the ceiling the lane has always
+// allowed a request to reach.
+const HW_FLOOR = 1;
+const HW_CEIL = 3e7;
 
 // pwmUnit stores the display exponent (-3 mHz, 0 Hz, 3 kHz, 6 MHz); this
 // sentinel instead means "auto-derive the unit from the frequency".
@@ -196,6 +227,7 @@ export class PinModel extends Emitter {
   devIn = 0;
   devOut = 0;
   devPwm = 0;
+  devPwmPio = 0; // cfg_pio_pwm: which of the live channels the PIO generator runs
   sel: number | null = null;
   slotSel: SlotSel | null = null; // the bus-card slot the user clicked; see slotSelAccepts
   buses: I2cBus[] = []; // I2C bus instances (multi-pin functions)
@@ -239,6 +271,34 @@ export class PinModel extends Emitter {
   private spiMaxCs = 4;
   private spiMaxBuses = 2;
   private spiCeiling = 0; // 0 = unknown
+  // caps.pwm_pio as the device reported it, or null while no PIO generator is known.
+  // Kept whole because the lane's window is a division of these five numbers; the
+  // per-pin half of the same table already lives in the capability bits (C_PWM_PIO).
+  private pwmPioTable: PwmPioCaps | null = null;
+
+  // The PIO PWM generator's measured limits, or null when this firmware has none: the
+  // lane then hides the backend choice instead of offering a mode that would be refused.
+  get pwmPio(): PwmPioCaps | null {
+    return this.pwmPioTable;
+  }
+
+  // The frequency window one backend can hold, in Hz, derived rather than typed: a PIO
+  // period is high + low + fixed_cycles SM ticks on a clock between clk_min and clk_max,
+  // so its slowest wave is clk_min over the longest legal period and its fastest is
+  // clk_max over the shortest.
+  pwmWindow(be: PwmBackend): [number, number] {
+    const p = this.pwmPioTable;
+    if (be === "pio" && p)
+      return [p.clk_min / (2 * p.counters + p.fixed_cycles), p.clk_max / (p.fixed_cycles + 2)];
+    return [HW_FLOOR, HW_CEIL];
+  }
+
+  // Duty steps the PIO generator has at the slowest frequency it can hold: both counters
+  // full, which is also the only setting that reaches the floor.
+  get pwmPioSteps(): number {
+    const p = this.pwmPioTable;
+    return p ? 2 * p.counters : 0;
+  }
 
   // Reads the capability table — the only way a view is allowed to ask what a
   // slot may do.
@@ -329,11 +389,26 @@ export class PinModel extends Emitter {
     this.spiMaxBuses = Number(sp?.max_buses) > 0 ? Number(sp.max_buses) : 2;
     this.spiCeiling = Number(sp?.baud_ceiling) > 0 ? Number(sp.baud_ceiling) : 0;
 
+    // The PIO row arrives whole or not at all: a firmware without the generator sends
+    // null, and a half-read table would hand the lane a window it cannot honour.
+    const pio = caps?.pwm_pio;
+    this.pwmPioTable =
+      pio && Number(pio.clk_min) > 0 && Number(pio.counters) > 0
+        ? {
+            max_sm: Number(pio.max_sm) || 0,
+            fixed_cycles: Number(pio.fixed_cycles) || 0,
+            counters: Number(pio.counters),
+            clk_min: Number(pio.clk_min),
+            clk_max: Number(pio.clk_max),
+          }
+        : null;
+
     // One place turns the message into truth for every view; see buildCaps.
     this.cap = buildCaps({
       gp,
       pins,
       pwm,
+      pwmPio: nums(caps?.pwm_pio?.pins),
       adc,
       i2c: i2cRoles,
       uart: utx || urx ? { tx: new Set(utx ?? []), rx: new Set(urx ?? []) } : null,
@@ -388,6 +463,20 @@ export class PinModel extends Emitter {
       const bit = ROLE_BIT[this.roles[n]];
       if (bit !== undefined && !this.hasCap(n, bit)) dropPin(n);
     }
+    // A PIO channel survives on firmware that has no PIO generator by changing generator,
+    // not by losing the pin: freq/duty stay, the frequency re-clamps into the slice's
+    // narrower window. The backend choice is a caps fact like any other, so it is pruned
+    // here rather than by a check at each place a channel is read.
+    let demoted = false;
+    for (let n = 0; n < SLOTS; n++) {
+      const p = this.pwm[n];
+      if (!p || p.backend !== "pio") continue;
+      if (this.pwmPioTable && this.hasCap(n, C_PWM_PIO)) continue;
+      const [lo, hi] = this.pwmWindow("hw");
+      p.backend = "hw";
+      p.freq = Math.min(Math.max(p.freq, lo), hi);
+      demoted = true;
+    }
     // Half a bus stays half a bus: only the offending line is released, so the
     // card survives and the user can drop in a legal partner.
     for (const b of this.buses) {
@@ -421,7 +510,7 @@ export class PinModel extends Emitter {
         dropped.push({ pin, role: R_SPI });
       }
     }
-    if (dropped.length) this.emit("config");
+    if (dropped.length || demoted) this.emit("config");
     return dropped;
   }
 
@@ -547,6 +636,23 @@ export class PinModel extends Emitter {
     let m = 0;
     for (let n = 0; n < NUM; n++) if (this.roles[n] === R_PWM) m = setBit(m, n, true);
     return m;
+  }
+
+  // The same mask the device reports as cfg_pio_pwm: live PWM channels on the PIO side.
+  pwmPioMask(): number {
+    let m = 0;
+    for (let n = 0; n < NUM; n++)
+      if (this.roles[n] === R_PWM && this.pwm[n]?.backend === "pio") m = setBit(m, n, true);
+    return m;
+  }
+
+  // Which generator the BOARD says is driving this pin, as opposed to the one the
+  // config asked for. A refused channel (the state-machine budget being the usual
+  // case) stays absent from both masks, so the UI can offer the pick again instead of
+  // reading its own optimistic `pwm[n].backend` as "already done".
+  devPwmBackend(n: number, be: PwmBackend): boolean {
+    const pio = isBit(this.devPwmPio, n);
+    return be === "pio" ? pio : isBit(this.devPwm, n) && !pio;
   }
 
   adcMask(): number {
@@ -998,6 +1104,7 @@ export class PinModel extends Emitter {
     this.devIn = wireMask(d.in);
     this.devOut = wireMask(d.out);
     this.devPwm = wireMask(d.cfg_pwm);
+    this.devPwmPio = wireMask(d.cfg_pio_pwm);
     this.emit("levels");
     const none = {
       gpioDrift: false,
@@ -1012,7 +1119,12 @@ export class PinModel extends Emitter {
     const gpioDrift =
       d.cfg_in !== w.in || d.cfg_out !== w.out ||
       (wireMask(d.cfg_pd)) !== w.pd || (wireMask(d.cfg_pn)) !== w.pn;
-    const pwmDrift = (d.cfg_pwm ?? 0) !== this.pwmMask();
+    // Both halves of the PWM lane: which pins run, and which of those the PIO generator
+    // owns. The pin mask alone would call a channel that silently fell back to a hardware
+    // slice healthy, so the PIO mask is compared next to it.
+    const pwmDrift =
+      (d.cfg_pwm ?? 0) !== this.pwmMask() ||
+      (d.cfg_pio_pwm ?? 0) !== this.pwmPioMask();
     const adcDrift =
       (d.cfg_adc ?? 0) !== this.adcMask() || !!d.adc_temp !== this.adcTempOn();
     const devI2cSig = Array.isArray(d.i2c)
