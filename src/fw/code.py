@@ -6,7 +6,11 @@
 # Architecture: a command dispatch table routes to per-function drivers
 # (gpio / pwm / ...). Every driver must claim(n, who) a pin before touching
 # it and release(n) when done — the owner table is the single arbiter of pin
-# ownership, so functions can never fight over a pin implicitly.
+# ownership, so functions can never fight over a pin implicitly. The PWM lane has two
+# generators behind the same command: the rp2 hardware slice, and a PIO countdown whose
+# floor is the SM clock over the longest legal period (0.0175 Hz measured; see
+# caps["pwm_pio"]); the host picks one per channel and the device reports which one is
+# running.
 # Main loop is an asyncio task group: command_reader + gpio_monitor, which
 # pushes {"evt":"gpio_in","in":mask} on input level *edges* but only while the
 # host is subscribed to topic "gpio.in" (see SUBS / cmd_sub — MQTT-style, with
@@ -43,6 +47,7 @@ import select
 import time
 import json
 import struct
+import array
 import asyncio
 
 import board
@@ -51,6 +56,13 @@ import analogio
 import microcontroller
 import busio
 from pwmio import PWMOut
+
+try:
+    import rp2pio  # frozen into the rp2 builds: the PIO core needs no library to copy
+    import adafruit_pioasm  # the ONE third-party file this needs: lib/adafruit_pioasm.mpy
+except ImportError:
+    rp2pio = None
+    adafruit_pioasm = None
 
 try:
     import usb_cdc
@@ -65,7 +77,7 @@ if DATA is not None:
     DATA.timeout = 0  # read() returns immediately instead of waiting for bytes
 
 APP = "PicoHarness"
-VERSION = "0.1.17-gp29"
+VERSION = "0.1.18-pio"
 # Which GPIOs this harness may touch is decided by two things stacked on top of
 # each other: the CHIP PACKAGE and, narrower still, the BOARD DEFINITION.
 #  * pico-sdk src/rp2350/hardware_regs/include/hardware/platform_defs.h sets
@@ -310,26 +322,191 @@ def set_out(mask, vals):
             pin_obj[n].value = bool((out_bits >> n) & 1)
 
 
+# —— PWM: the PIO backend ——
+# PWMOut cannot go slow: its divider works in whole hertz, and measured on this build
+# every request from 1..8 Hz lands on 9 Hz. A PIO countdown can: one TX word carries the
+# high and low tick counts of a whole period, so the floor is the SM clock floor divided
+# by the longest legal period -- 2288 / (2*65535 + 8) = 0.0175 Hz, 5.7x below the 0.1 Hz
+# this lane was asked to reach (measured end to end at 0.100053 Hz).
+#
+# Every figure below was measured on the board with tools/pio_pwm_probe.py and
+# tools/pio_bg_probe.py, and they ship in one place on purpose: caps["pwm_pio"] is what
+# the UI reads to decide the floor, the step count and whether the button exists at all,
+# so no second copy of these numbers exists anywhere.
+#
+# The program is 8 words and each period re-arms the counters from the FIFO, so the whole
+# PIO budget belongs to this lane (I2C / UART / SPI are all hardware peripherals here) and
+# the 12 state machines RP2350 offers (3 blocks x 4) are 12 PWM channels. It differs from
+# the 9-word program the probes measured in one place: the probe ended each pass with a
+# push so the host could timestamp the period, and the shipped version has no push, because
+# a machine that nobody drains would stall on a full RX FIFO within eight periods.
+PIO_ASM = """
+.program pwmpio
+  pull block
+  out x, 16
+  out y, 16
+  set pins, 1
+high:
+  jmp x-- high
+  set pins, 0
+low:
+  jmp y-- low
+  jmp 0
+"""
+# Words outside the two loops, all executed once per period (including the two countdown
+# jumps that finally fail). Measured: `jmp x--` costs exactly 1 SM cycle, so a period is
+# high + low + PIO_FIXED_CYCLES cycles and one tick is one SM cycle.
+PIO_FIXED_CYCLES = 8
+# Each counter is one 16-bit half of the TX word. Which half lands where was measured, not
+# assumed: `out x,16` reads the LOW half, and x drives the high phase, hence the packing in
+# _pio_word(). A symmetric test word cannot see this, so getting it wrong is a silent duty
+# inversion. One consequence of the shape: an empty phase still spends a cycle, so PIO duty
+# spans one tick to period-minus-one-tick rather than a true 0 % and 100 %.
+PIO_MAX_COUNT = 65535
+PIO_MAX_SM = 12
+# SM clock window this build accepts; requests outside it raise ValueError. The divider is
+# much wider than rp2040's 8.4 bits (measured divisor ~65560 at the floor), so the usual
+# "586 kHz floor" reasoning does not apply.
+PIO_CLK_MIN = 2288
+PIO_CLK_MAX = 150000000
+
+# Assembled once at import: adafruit_pioasm runs on the device, so there is no host build
+# step and no generated-bytes artifact to keep in the repo.
+PIO_WORDS = None
+if rp2pio is not None and adafruit_pioasm is not None:
+    try:
+        PIO_WORDS = adafruit_pioasm.assemble(PIO_ASM)
+    except Exception:
+        PIO_WORDS = None
+
+pio_sm_used = 0
+
+
+def _pio_word(high, low):
+    return array.array("I", [((low << 16) | high) & 0xFFFFFFFF])
+
+
+def _pio_solve(freq, duty):
+    # A period is high + low + PIO_FIXED_CYCLES SM cycles, so the longest waveform the two
+    # counters can describe is 2*65535+8 ticks. Take the longest period whose clock still
+    # fits under the ceiling: a 1 kHz channel then keeps all 131070 duty steps and only the
+    # MHz end has to give resolution away.
+    counts = min(2 * PIO_MAX_COUNT, int(PIO_CLK_MAX // freq) - PIO_FIXED_CYCLES)
+    if counts < 2:
+        raise ValueError(
+            "freq above PIO ceiling %d Hz" % (PIO_CLK_MAX // (PIO_FIXED_CYCLES + 2)))
+    # The LONGER half has to fit in 16 bits, so an extreme duty shortens the period instead
+    # of clipping the waveform -- clipping would silently move the frequency as well.
+    counts = min(counts, int(PIO_MAX_COUNT / max(duty, 1.0 - duty)))
+    high = min(PIO_MAX_COUNT, int(round(counts * duty)))
+    low = counts - high
+    # Truncated, not rounded: counts already came out of the ceiling, so rounding up can
+    # ask for a clock just over 150 MHz, which the constructor rejects.
+    clock = int(freq * (counts + PIO_FIXED_CYCLES))
+    if clock < PIO_CLK_MIN:
+        raise ValueError("clock %d Hz below PIO floor %d Hz: %.6g Hz at duty %.4g is out "
+                         "of PIO range" % (clock, PIO_CLK_MIN, freq, duty))
+    return clock, high, low, counts + PIO_FIXED_CYCLES
+
+
+def _pio_start(n, freq, duty):
+    """Arm a fresh state machine on this pin. Rebuilding is not a stylistic choice: a
+    running machine keeps honouring the 4-deep TX FIFO, so new counts measured 5 periods
+    later (4 even after restart()). A rebuilt machine armed before it runs is on the new
+    period from its very first cycle."""
+    global pio_sm_used
+    if PIO_WORDS is None:
+        raise RuntimeError("PIO PWM unavailable: copy lib/adafruit_pioasm.mpy")
+    if pio_sm_used >= PIO_MAX_SM:
+        raise RuntimeError(
+            "no free PIO state machine (%d/%d in use)" % (pio_sm_used, PIO_MAX_SM))
+    clock, high, low, cycles = _pio_solve(freq, duty)
+    try:
+        sm = rp2pio.StateMachine(
+            PIO_WORDS, frequency=clock, first_set_pin=_pin(n), wait_for_txstall=False)
+    except ValueError as e:
+        # A constructor that raises still leaves its pin claimed by the PIO block until the
+        # board resets, so say so: the UI must show which GP is now unusable rather than
+        # let the next attempt on it look like a new, unrelated failure.
+        raise RuntimeError("GP%d PIO start refused: %s" % (n, e))
+    pio_sm_used += 1
+    try:
+        sm.background_write(loop=_pio_word(high, low))
+    except Exception:
+        sm.deinit()
+        pio_sm_used -= 1
+        raise
+    return sm, cycles
+
+
+def pio_caps():
+    # None rather than an empty dict when the library is missing: the UI then hides the
+    # backend control instead of offering a mode the firmware cannot honour.
+    if PIO_WORDS is None:
+        return None
+    return {
+        # PIO matrices exist on every RP2350 GPIO, so this is the addressable set itself;
+        # GP2..GP29 were each confirmed to accept first_set_pin on the board, GP0/GP1 by
+        # the datasheet and the Stage 5 check.
+        "pins": GPS,
+        "max_sm": PIO_MAX_SM,
+        "tick_cycles": 1,
+        "fixed_cycles": PIO_FIXED_CYCLES,
+        "counters": PIO_MAX_COUNT,
+        "clk_min": PIO_CLK_MIN,
+        "clk_max": PIO_CLK_MAX,
+    }
+
+
 # —— PWM driver ——
 pwm_obj = [None] * NUM_PINS
-pwm_par = [None] * NUM_PINS  # (requested freq, hardware freq, duty 0..1) for reporting
+pwm_sm = [None] * NUM_PINS  # set instead of pwm_obj[n] while the channel runs on PIO
+pwm_par = [None] * NUM_PINS  # (requested freq, actual freq, duty 0..1, backend)
 
 
 def pwm_release(n):
+    # Both backends are torn down on every path that loses the pin, or the orphaned state
+    # machine keeps toggling a GPIO the new owner thinks it controls -- and burns one of
+    # the 12 for the rest of the session.
+    global pio_sm_used
+    if pwm_sm[n]:
+        pwm_sm[n].deinit()
+        pwm_sm[n] = None
+        pio_sm_used -= 1
     if pwm_obj[n]:
         pwm_obj[n].deinit()
         pwm_obj[n] = None
     pwm_par[n] = None
 
 
-def pwm_start(pin, freq, duty):
+def pwm_start(pin, freq, duty, backend="hw"):
     n = int(pin)
     if not 0 <= n < NUM_PINS:
         raise ValueError("pin out of range")
+    if backend not in ("hw", "pio"):
+        raise ValueError("unknown pwm backend %r" % backend)
     if not claim(n, "pwm", force=True):  # steals plain-GPIO pins on purpose
         raise RuntimeError("pin busy")
     duty = max(0.0, min(1.0, float(duty)))
     freq = float(freq)
+    # Two generators cannot share one pad, and a PIO channel is rebuilt even for a
+    # duty-only change: a running machine keeps honouring its 4-deep TX FIFO, so new counts
+    # measured five periods late. owner[] keeps saying "pwm" straight through both.
+    if backend == "pio" or (pwm_par[n] and pwm_par[n][3] != backend):
+        pwm_release(n)
+    if backend == "pio":
+        # An SM whose constructor raised leaves its pin claimed by the PIO block until the
+        # board resets, so drop the harness claim too and let the message name the GP.
+        try:
+            sm, total = _pio_start(n, freq, duty)
+        except Exception:
+            release(n)
+            raise
+        pwm_sm[n] = sm
+        # sm.frequency is the clock the divider actually produced, so the reported figure
+        # is what the pin does, not what was asked for.
+        pwm_par[n] = (freq, sm.frequency / float(total), duty, "pio")
+        return
     if freq < 1:
         raise ValueError("freq < 1 Hz: PWMOut takes whole hertz")
     freq = int(freq)
@@ -356,7 +533,7 @@ def pwm_start(pin, freq, duty):
     # The getter answers with the frequency the slice really runs at, and the
     # rp2 divider cannot follow every request: 1..8 Hz all land on 9 Hz and
     # 1000 Hz lands on 990 (CircuitPython 10.3.1, measured on GP25/GP2/GP12/GP0).
-    pwm_par[n] = (freq, int(pwm_obj[n].frequency), duty)
+    pwm_par[n] = (freq, int(pwm_obj[n].frequency), duty, "hw")
 
 
 def pwm_stop(pin):
@@ -1176,6 +1353,10 @@ def probe_caps():
             "max_cs": SPI_MAX_CS,
             "baud_ceiling": 75000000,
         },
+        # The slow-frequency PIO backend: one static table of measured numbers, no per-pin
+        # sweep (see pio_caps()). None when lib/adafruit_pioasm.mpy is not on the volume,
+        # which is how the host learns not to offer the mode at all.
+        "pwm_pio": pio_caps(),
         # Which CDC topology the board came up with: true = boot.py enabled the
         # second port and the protocol is on it, false = single-port console
         # fallback. The host needs this to know whether a console port exists.
@@ -1231,15 +1412,19 @@ def read_state():
         elif pin_pull[n] == 2:
             pn |= 1 << n
     pwm_m = 0
+    pio_m = 0
     pw = {}
     adc_m = 0
     for n in range(NUM_PINS):
         if owner[n] == "pwm":
             pwm_m |= 1 << n
+            if pwm_sm[n]:
+                pio_m |= 1 << n
             pw[str(n)] = {
                 "freq": pwm_par[n][0],
                 "hfreq": pwm_par[n][1],
                 "duty": pwm_par[n][2],
+                "be": pwm_par[n][3],
             }
         elif owner[n] == "adc":
             adc_m |= 1 << n
@@ -1287,6 +1472,11 @@ def read_state():
         "cfg_pd": pd,
         "cfg_pn": pn,
         "cfg_pwm": pwm_m,
+        # Which of those channels the PIO generator is driving, and how many state machines
+        # are still free -- the host needs the second number to explain a refusal, since
+        # the budget is per chip, not per pin.
+        "cfg_pio_pwm": pio_m,
+        "pio_sm_free": PIO_MAX_SM - pio_sm_used,
         "cfg_adc": adc_m,
         "cfg_i2c": i2c_m,
         "i2c": i2c_list,
@@ -1333,7 +1523,14 @@ def cmd_gpio_state(args):
 
 
 def cmd_pwm_cfg(args):
-    pwm_start(args.get("pin"), args.get("freq", 1000), args.get("duty", 0.5))
+    # backend defaults to "hw": a config saved before the PIO lane existed, or a hand-typed
+    # request that names nothing, must keep behaving exactly as it did.
+    pwm_start(
+        args.get("pin"),
+        args.get("freq", 1000),
+        args.get("duty", 0.5),
+        args.get("backend") or "hw",
+    )
     return {"ok": True, "data": read_state()}
 
 
