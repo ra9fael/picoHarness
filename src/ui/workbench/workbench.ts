@@ -4,7 +4,7 @@
 // Adding I2C/SPI later = write a def module and push it into this.defs.
 import type { SerialLink, JsonMsg } from "../serial";
 import { PinModel, SLOTS, C_ADC, C_SCL, C_SDA, C_TX, C_RX, C_SCK, C_MOSI, C_MISO, C_PWM, R_ADC, R_PWM, R_I2C, R_UART, R_SPI, pinLabel } from "../model/pins";
-import { blankConfig, clearStored, configText, importConfig as importSnapshot, loadConfig, saveConfig } from "../model/store";
+import { blankConfig, clearStored, configText, importConfig as importSnapshot, isBlank, loadConfig, sameConfig, saveConfig } from "../model/store";
 import { t, tf, type MsgKey } from "../i18n";
 import { el } from "./dom";
 import type { FuncApi, FunctionDef } from "./types";
@@ -250,6 +250,54 @@ export class Workbench {
     blankConfig(this.model);
     this.afterConfigChange();
     clearStored();
+  }
+
+  // —— device-side config vault ——
+  // The board keeps the same snapshot an exported file holds, so every path into it
+  // is the path a picked file already takes: fetch the text, hand it to the import
+  // routine, let the normal dispatch push the result down to the pins. The firmware
+  // stores these bytes without reading them (see its cfg.* handlers), which is what
+  // keeps the schema owned here and nowhere else.
+  get deviceCfg(): { path: string; maxBytes: number } | null {
+    return this.model.cfgVault;
+  }
+
+  // The snapshot stored on the board, or null when it has never been written.
+  async readDevice(): Promise<string | null> {
+    const r = await this.link.sendCmd("cfg.get");
+    if (!r.ok) throw new Error(String(r.error));
+    return typeof r.data?.text === "string" ? r.data.text : null;
+  }
+
+  async writeDevice(): Promise<{ path: string; bytes: number }> {
+    const vault = this.model.cfgVault;
+    if (!vault) throw new Error(t("cfg_dev_absent"));
+    const text = configText(this.model);
+    // Checked before the send, not after: the refusal would say the same thing, but
+    // only after a few kilobytes have crawled over the wire.
+    if (vault.maxBytes && text.length > vault.maxBytes)
+      throw new Error(tf("cfg_dev_too_big", vault.maxBytes));
+    const r = await this.link.sendCmd("cfg.save", { text });
+    if (!r.ok) throw new Error(String(r.error));
+    return { path: vault.path, bytes: Number(r.data?.bytes) || text.length };
+  }
+
+  async eraseDevice(): Promise<string> {
+    const r = await this.link.sendCmd("cfg.clear");
+    if (!r.ok) throw new Error(String(r.error));
+    return this.model.cfgVault?.path ?? String(r.data?.path ?? "");
+  }
+
+  // Whether the board's copy is the config already loaded; the connect-time check
+  // asks this before it bothers the user with a choice.
+  matchesDevice(text: string): boolean {
+    return sameConfig(configText(this.model), text);
+  }
+
+  // Nothing bound here — the state a first run is in, where the board's copy is not
+  // a competing config but the only one there is.
+  get configIsBlank(): boolean {
+    return isBlank(this.model);
   }
 
   private afterConfigChange(): void {

@@ -19,7 +19,14 @@
         <button id="cfg-export" data-i18n="cfg_export">导出配置</button>
         <button id="cfg-import" data-i18n="cfg_import">导入配置</button>
         <button id="cfg-reset" data-i18n="cfg_reset">清空配置</button>
-        <div class="cfg-note" data-i18n="cfg_note">配置存在浏览器里，不在板子里</div>
+        <div class="cfg-note" data-i18n="cfg_note">配置自动存在浏览器里</div>
+        <div id="cfg-dev" hidden>
+          <div class="cfg-sep"></div>
+          <button id="cfg-dev-save" data-i18n="cfg_dev_save">保存到板子</button>
+          <button id="cfg-dev-load" data-i18n="cfg_dev_load">从板子载入</button>
+          <button id="cfg-dev-clear" data-i18n="cfg_dev_clear">删除板子配置</button>
+          <div class="cfg-note" data-i18n="cfg_dev_note">板子里那份只在手动保存时改写</div>
+        </div>
       </div>
     </div>
     <button id="btn-lang" title="Switch language">EN</button>

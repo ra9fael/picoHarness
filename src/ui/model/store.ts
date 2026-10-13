@@ -2,6 +2,9 @@
 // pulls, PWM params). Restored silently on page load; the device catches up
 // through the normal gpio.cfg sendNow + pwm drift-reconciliation path once
 // the link becomes ready, so no restore-time commands are needed here.
+// This is also the ONLY owner of the snapshot schema: an exported file, the
+// browser copy and the board's /config.json (firmware cfg.get/cfg.save) are the
+// same bytes, because all three are written here and read back here.
 import type { PinModel } from "./pins";
 import { SLOTS, R_PWM, R_ADC, R_I2C, R_UART, R_SPI, PWM_UNIT_AUTO } from "./pins";
 
@@ -182,6 +185,25 @@ export function importConfig(model: PinModel, text: string): number {
 // Pretty-printed, so an exported file stays hand-editable.
 export function configText(model: PinModel): string {
   return JSON.stringify(snapshotOf(model), null, 2);
+}
+
+// Whether nothing is bound — the state a fresh page is in when the browser has
+// never stored a config. The connect-time priority reads this to tell "the board
+// holds the only copy" apart from "two copies disagree".
+export function isBlank(model: PinModel): boolean {
+  const s = snapshotOf(model);
+  return !s.pins.length && !s.buses.length && !s.uarts.length && !s.spis.length;
+}
+
+// Two snapshots the user might be about to drop, compared as JSON. Same bytes is
+// the same config, so this never has to keep a field list up to date with the
+// schema; a hand-reordered file reads as different, which costs one question.
+export function sameConfig(a: string, b: string): boolean {
+  try {
+    return JSON.stringify(JSON.parse(a)) === JSON.stringify(JSON.parse(b));
+  } catch {
+    return false;
+  }
 }
 
 export function clearStored(): void {

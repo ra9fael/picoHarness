@@ -275,6 +275,11 @@ export class PinModel extends Emitter {
   // Kept whole because the lane's window is a division of these five numbers; the
   // per-pin half of the same table already lives in the capability bits (C_PWM_PIO).
   private pwmPioTable: PwmPioCaps | null = null;
+  // caps.cfg: the device-side config vault, or null on a firmware with no cfg.*
+  // commands at all. Not a pin fact, so it sits beside the table like the other
+  // whole-feature caps — and it gates the menu the same way a missing PIO table
+  // gates the backend pick, instead of offering buttons that answer "unknown cmd".
+  private cfgTable: { path: string; maxBytes: number } | null = null;
 
   // The PIO PWM generator's measured limits, or null when this firmware has none: the
   // lane then hides the backend choice instead of offering a mode that would be refused.
@@ -403,6 +408,15 @@ export class PinModel extends Emitter {
           }
         : null;
 
+    // The device-side vault: a firmware with cfg.* reports {path, max_bytes}, one
+    // without reports nothing. Unlike a per-pin table, unknown means absent here,
+    // not permissive — offering the menu would be offering an error.
+    const cfg = caps?.cfg;
+    this.cfgTable =
+      cfg && typeof cfg.path === "string" && cfg.path
+        ? { path: cfg.path, maxBytes: Number(cfg.max_bytes) > 0 ? Number(cfg.max_bytes) : 0 }
+        : null;
+
     // One place turns the message into truth for every view; see buildCaps.
     this.cap = buildCaps({
       gp,
@@ -418,6 +432,13 @@ export class PinModel extends Emitter {
     this.knownI2c = pairs !== null;
     this.knownUart = utx !== null || urx !== null;
     this.knownSpi = spiGroups !== null;
+  }
+
+  // The device-side config vault as the firmware reported it, or null when this
+  // firmware has no cfg.* commands — the menu then hides the entries instead of
+  // offering buttons that would answer "unknown cmd".
+  get cfgVault(): { path: string; maxBytes: number } | null {
+    return this.cfgTable;
   }
 
   // Public caps reads for the SPI lane: how many CS slots to draw, how many buses

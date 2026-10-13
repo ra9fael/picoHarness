@@ -91,6 +91,7 @@ function syncUi() {
   // behaviour for this release, and the user should see that while it works.
   legacyWarn.hidden = !(linkState === "ready" && !link.dualCdc);
   btnPing.disabled = btnEcho.disabled = linkState !== "ready" || consolePanel.mode !== "monitor";
+  syncCfgMenu();
   wb.setActive(linkState === "ready" && consolePanel.mode === "monitor");
   scope.setActive(linkState === "ready" && consolePanel.mode === "monitor");
 }
@@ -121,6 +122,7 @@ link.onEvent = (m) => {
     // Only reaches here when the program restarted under an established link
     // (reset button, or code.py saved from Explorer): caps may have changed.
     wb.setCaps(m.caps);
+    syncCfgMenu(); // a reflashed firmware may have added or dropped the config vault
     consolePanel.note(tf("ready_again", JSON.stringify(m)));
     return;
   }
@@ -157,6 +159,9 @@ btnConnect.addEventListener("click", async () => {
     syncUi();
     consolePanel.note(tf("handshake_ok", JSON.stringify(ready)));
     if (link.dualCdc && !link.consoleAttached) consolePanel.note(t("hint_logport_missing"));
+    // Only on an explicit connect: a program restart under a live link must not
+    // re-ask a question the user has just answered.
+    await deviceConfigPriority();
   } catch (e: any) {
     consolePanel.note(tf("handshake_fail", e.message));
     if (link.state === "connecting") {
@@ -264,6 +269,75 @@ $("cfg-reset").addEventListener("click", () => {
   wb.resetConfig();
   consolePanel.note(t("cfg_reset_done"));
 });
+
+// The board's copy of the config is a firmware feature: a board that does not
+// report caps.cfg has no device rows at all, the same rule that hides the PWM
+// backend pick on a firmware without a PIO generator. Nothing here can therefore
+// answer the user with "unknown cmd".
+const cfgDev = $("cfg-dev");
+const cfgDevSave = $("cfg-dev-save") as HTMLButtonElement;
+const cfgDevLoad = $("cfg-dev-load") as HTMLButtonElement;
+const cfgDevClear = $("cfg-dev-clear") as HTMLButtonElement;
+
+function syncCfgMenu(): void {
+  cfgDev.hidden = !wb.deviceCfg;
+  const live = linkState === "ready" && !!wb.deviceCfg;
+  cfgDevSave.disabled = cfgDevLoad.disabled = cfgDevClear.disabled = !live;
+}
+
+cfgDevSave.addEventListener("click", async () => {
+  cfgWrap.classList.remove("open");
+  try {
+    const r = await wb.writeDevice();
+    consolePanel.note(tf("cfg_dev_saved", r.path, r.bytes));
+  } catch (e: any) {
+    consolePanel.note(tf("cfg_dev_fail", e.message));
+  }
+});
+
+cfgDevLoad.addEventListener("click", async () => {
+  cfgWrap.classList.remove("open");
+  try {
+    const text = await wb.readDevice();
+    if (text === null) {
+      consolePanel.note(t("cfg_dev_empty"));
+      return;
+    }
+    consolePanel.note(tf("cfg_dev_loaded", wb.importConfig(text)));
+  } catch (e: any) {
+    consolePanel.note(tf("cfg_dev_fail", e.message));
+  }
+});
+
+cfgDevClear.addEventListener("click", async () => {
+  cfgWrap.classList.remove("open");
+  if (!confirm(t("cfg_dev_clear_confirm"))) return;
+  try {
+    consolePanel.note(tf("cfg_dev_cleared", await wb.eraseDevice()));
+  } catch (e: any) {
+    consolePanel.note(tf("cfg_dev_fail", e.message));
+  }
+});
+
+// Which config the session starts from. The board's file wins over a blank
+// workbench and is asked about before it overwrites one that already holds
+// something; a board with no file, or one holding exactly what is loaded, says
+// nothing. Deliberately not run on a `ready` event under an established link —
+// pressing RESET should not re-ask a question the user has just answered.
+async function deviceConfigPriority(): Promise<void> {
+  if (!wb.deviceCfg) return;
+  let text: string | null;
+  try {
+    text = await wb.readDevice();
+  } catch (e: any) {
+    consolePanel.note(tf("cfg_dev_fail", e.message));
+    return;
+  }
+  if (text === null || wb.matchesDevice(text)) return;
+  if (wb.configIsBlank || confirm(t("cfg_dev_ask")))
+    consolePanel.note(tf("cfg_dev_loaded", wb.importConfig(text)));
+  else consolePanel.note(t("cfg_dev_kept"));
+}
 
 $("btn-clear").addEventListener("click", () => {
   if (uartTerms.uartActive()) uartTerms.clearActive();
