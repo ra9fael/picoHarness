@@ -2,7 +2,7 @@
 
 这篇是速查手册，不是教程。想知道怎么用先看 [01 使用手册](../01_GUIApp_FW_Manual/README.md)。
 
-固件版本 0.1.18-pio 的全部对外接口。
+固件版本 0.1.19-cfg 的全部对外接口。
 
 ---
 
@@ -66,7 +66,7 @@ payload 第一个字节是 **kind**，标识这是哪种流：
 设备启动时主动发一条事件：
 
 ```json
-{"evt":"ready","app":"PicoHarness","version":"0.1.18-pio",
+{"evt":"ready","app":"PicoHarness","version":"0.1.19-cfg",
  "cp":[10,3,1],"pins":29,"gp":[0,1,2,...,22,26,27,28],
  "caps":{"pwm":[...],"pwm_pio":{"pins":[...],"max_sm":12,"tick_cycles":1,
                                             "fixed_cycles":8,"counters":65535,
@@ -75,6 +75,7 @@ payload 第一个字节是 **kind**，标识这是哪种流：
          "uart":{"tx":[...],"rx":[...],"pairs":[[tx,rx],...]},
          "spi":{"groups":[{"sck":[...],"mosi":[...],"miso":[...]},...],
                 "max_buses":2,"max_cs":4,"baud_ceiling":75000000},
+         "cfg":{"path":"/config.json","max_bytes":65536},
          "usb":{"data":true}}}
 ```
 
@@ -90,6 +91,7 @@ payload 第一个字节是 **kind**，标识这是哪种流：
 | `caps.i2c_pairs` | **有序对**数组，每对是 `[SCL, SDA]` |
 | `caps.uart` | `tx` 数组、`rx` 数组、`pairs` 有序对数组（`[TX, RX]`） |
 | `caps.spi` | `groups` 每组的 `sck/mosi/miso` 脚号数组，外加 `max_buses`、`max_cs`、`baud_ceiling` |
+| `caps.cfg` | 设备端配置保险箱：`path` 是它在卷上的文件名，`max_bytes` 是单次能写进去的上限。**这台固件没有 `cfg.*` 命令时整个字段缺席**，界面就不显示"保存到板子"那一组按钮（与 `pwm_pio` 缺席时不显示 HW / PIO 选择是同一条规则） |
 | `caps.usb.data` | 协议是否跑在独立的 data 口上（`boot.py` 生效即为 true） |
 
 ### 2.0 脚号从哪来：封装 × 板级定义
@@ -202,7 +204,7 @@ CircuitPython 10.3.1 / Pico 2 上逐组合实测（53 个被接受、1571 个报
 
 ## 3. 命令总表
 
-24 条。除 `ping` / `echo` 外，成功的应答 `data` 通常就是第 4 节那份 state 对象。
+27 条。除 `ping` / `echo` 外，成功的应答 `data` 通常就是第 4 节那份 state 对象。
 
 ### 3.1 通用
 
@@ -370,6 +372,36 @@ MQTT 风格的开关，用来控制设备主动推什么。
 订阅只用来调死区和触发 retained 快照，不是开关。GPIO 则严格门控，因为 1s 的
 `gpio.state` 对账轮询本来就会刷新输入状态。
 
+### 3.9 设备端配置
+
+把界面上那份配置存进板子的卷里。这三条是例外：应答 `data` 不是 state 对象。
+
+| 命令 | 参数 | 说明 |
+| --- | --- | --- |
+| `cfg.get` | 无 | `{"text": "<快照 JSON 或 null>", "path": ..., "bytes": n}`；`bytes` 只在文件存在时带上。文件不存在时 `text` 是 `null`，不是错误 |
+| `cfg.save` | `text`(字符串) | 写入。返回 `{"bytes": n, "path": ...}` |
+| `cfg.clear` | 无 | 删除。返回 `{"removed": true\|false, "path": ...}`，没有文件也算成功 |
+
+固件是**保险箱，不是读者**：它只检查送来的字符串是一段合法 JSON、并且顶层有 `pins`
+数组，然后原样存下，绝不解析字段，也**不在上电时按它给引脚编程**。所以快照的格式只有
+一个主人（前端的 `src/ui/model/store.ts`），导出的文件、浏览器里那份、板子里这第三份
+是同一串字节；固件升级不会因为"看不懂"而丢掉用户的东西。
+
+报错原文：
+
+| 命令 | 报错 | 触发条件 |
+| --- | --- | --- |
+| `cfg.save` | `need args.text` | 没带 `text`，或带的不是字符串 |
+| `cfg.save` | `config is not JSON` | 字符串解析不出 JSON |
+| `cfg.save` | `not a PicoHarness snapshot` | 解析出来是 JSON，但不是带 `pins` 数组的对象——大概率是手工编辑时改坏了 |
+| `cfg.save` | `config too large: N bytes` | 超过 `caps.cfg.max_bytes` |
+| `cfg.save` | `wrote N bytes, volume holds M` | 改名之后卷上的字节数和刚写的对不上 |
+| `cfg.get` | `/config.json is N bytes, over the 65536 limit` | 卷上那份大得反常——先报，不去读它 |
+
+写入走 `config.json.tmp` → 删除旧文件 → 改名，读完字节数再核对一遍，然后 `os.sync()`：
+掉电或主机拔线时，卷上要么是完整的旧配置，要么是完整的新配置，不会留下半份。
+`cfg.get` 在读之前先看大小，超过 `max_bytes` 直接报错，不会为了一份坏文件把内存吃光。
+
 ---
 
 ## 4. state 对象
@@ -465,3 +497,7 @@ CS 被算成"已占用"是有实际理由的：它是一根普通输出线，
 免得把板子不支持的请求发下去。发出去的 `pwm.cfg` 仍带 `backend:"hw"`，
 老固件不认这个参数也只是忽略它。窗口本身由这张表算出，两端都是精确除法，
 所以换固件不用改上位机的数字。
+
+`caps.cfg` 走的是 `pwm_pio` 那条路，不是"宽松放行"：收不到就没有"保存到板子 / 从板子载入 /
+删除板子配置"这三行菜单，界面也不会发 `cfg.*`。老的 `code.py` 因此不会收到它答不上来的命令，
+用户看到的是"这几项没有"，不是一行 `unknown cmd`。

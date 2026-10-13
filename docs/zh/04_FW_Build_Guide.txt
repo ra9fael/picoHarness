@@ -57,6 +57,11 @@ boot.py 里只写 usb_cdc.enable(...)，不要占 GP0/GP1、更不要提前建�
 引脚裁决者在 code.py 里，boot.py 抢了串口控制台就没法用了。
 G: 上没有 lib/ 时说明 circup 没装成功，code.py 会以 ImportError 起不来。
 
+界面"保存到板子"写的是 G:\config.json（临时文件 config.json.tmp 改名而来）。Web Serial 没有
+删除卷上文件的接口，所以 cfg.clear 之外你随时可以自己删：在资源管理器里打开 CIRCUITPY 卷删掉
+它就行，code.py 不碰这个文件，除非你让它读。板子被 UF2 重刷或整卷格式化时它自然一起没了。
+它只是一个备忘文件，上电不会被执行——开机引脚仍是未配置状态。
+
 双 CDC 之后设备在系统里是两个 COM 口：console 口给 CircuitPython 的横幅/print/回溯/REPL，
 data 口跑本项目的 JSON 行协议与二进制帧。两个口共用同一 VID/PID（0x2E8A:0x000B），
 设备管理器与 navigator.serial.getInfo() 都区分不了，只有 nonce ping 能认出口色，
@@ -114,6 +119,7 @@ npm run build 走的是 esbuild，它只做打包，不做类型检查。改过 
 界面发了新命令、设备回 "unknown cmd"，或者 gpio.state 应答里缺新字段、
 ready.caps 里没有 uart/i2c_pairs/spi —— 这不是前端 bug，是 G:\code.py 还是旧版本。
 先比对设备端 code.py 里的 VERSION 字符串与源码，重新拷一次即可。
+配置菜单里"保存到板子"那三行不见了，同样这条判据：ready.caps 里没有 cfg。
 只看到一个 COM 口、或 ready.caps.usb.data 为 false —— 是 G:\boot.py 没拷进去，
 或者拷完没做硬复位（Ctrl-D 不算）。
 ready.caps.spi 里的引脚组和别处实测不一致 —— 那是 SPI_GROUPS 这张静态表的问题，

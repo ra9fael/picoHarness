@@ -483,16 +483,38 @@ Three action buttons: clear, copy all, export as a txt file.
     reports `Imported {n} entries`. A file that is not a PicoHarness config is rejected with `Import failed: …`.
   - **Clear config** asks first ("Clear the saved configuration? Lane bindings, PWM settings and buses all return to
     unassigned."), then drops every binding and deletes the browser copy as well.
-  - The small line at the bottom of the menu is the point: **the config lives in the browser, not on the board**.
+  - When the connected firmware reports `caps.cfg`, a divider and three more rows appear: **Save to board**,
+    **Load from board**, **Delete board config**. Older firmware shows no such rows, so it is never handed a
+    command it cannot answer.
+  - Those three rows touch only the board's copy, and **the board's copy changes only when you save it**: loading
+    never writes back to the board, and clearing the configuration leaves it alone. To move a setup between two
+    boards, save on one, connect the other, load.
+  - **Delete board config** confirms first, with "Delete the configuration on the board? The browser copy is not
+    touched."
+  - The small line at the bottom of the menu is the point: **the configuration is saved in the browser automatically**.
 - To bypass the menu, run `localStorage.clear()` in the browser console and refresh.
+
+When the board holds a `/config.json`, connecting resolves which configuration the session starts from:
+
+| Workbench at that moment | Board's copy | What the UI does |
+| --- | --- | --- |
+| nothing bound | a file | loads it silently, console prints `Loaded {n} entries from the board` |
+| bindings | identical | nothing at all |
+| bindings | different | asks. OK loads the board's copy; Cancel keeps this one and prints `Kept the browser copy; the board's config is untouched` |
+| bindings | no file | nothing at all |
+
+The question appears only when you click **Connect**: a board that restarts while the link is already up (RESET, or
+saving `code.py` from Explorer) will not ask again something you have just answered.
 
 An imported file may not fit the board in front of you. **While connected, the handshake checks every binding against the
 capability table the device reported** and un-binds the pins this firmware cannot serve, naming them per function in the
 console, e.g. `Unbound PWM pins this firmware cannot drive: GP1 GP2` or `Unbound pins outside this firmware's UART pairs: GP10`.
 The released pins go back to the pool and the card survives, so you can drop in a legal partner. Importing while disconnected
-skips the check; the next handshake runs it anyway.
+skips the check; the next handshake runs it anyway. Loading from the board follows the same path, so a configuration saved on
+a different board gets named and released rather than written into the pins.
 
-Note that the configuration lives in the **browser**, not in the board. Move to another PC and you configure from scratch.
+Note that the **default** home of the configuration is the browser. The board's copy exists only because you saved it, and it is
+a file on the board's volume — a note saying "this board is configured like this", never something executed at boot.
 After the board loses power, its own configuration is zeroed; the page's once-per-second reconciliation replays it back.
 
 ---

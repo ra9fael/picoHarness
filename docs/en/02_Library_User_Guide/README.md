@@ -2,7 +2,7 @@
 
 This is a quick reference, not a tutorial. If you want to know how to use the harness, read the [01 User Manual](../01_GUIApp_FW_Manual/README.md) first.
 
-Every external interface of firmware version 0.1.18-pio.
+Every external interface of firmware version 0.1.19-cfg.
 
 ---
 
@@ -57,7 +57,7 @@ The host does **byte-level demultiplexing of the mixed stream**: it scans for th
 The device sends one event on startup:
 
 ```json
-{"evt":"ready","app":"PicoHarness","version":"0.1.18-pio",
+{"evt":"ready","app":"PicoHarness","version":"0.1.19-cfg",
  "cp":[10,3,1],"pins":29,"gp":[0,1,2,...,22,26,27,28],
  "caps":{"pwm":[...],"pwm_pio":{"pins":[...],"max_sm":12,"tick_cycles":1,
                                             "fixed_cycles":8,"counters":65535,
@@ -66,6 +66,7 @@ The device sends one event on startup:
          "uart":{"tx":[...],"rx":[...],"pairs":[[tx,rx],...]},
          "spi":{"groups":[{"sck":[...],"mosi":[...],"miso":[...]},...],
                 "max_buses":2,"max_cs":4,"baud_ceiling":75000000},
+         "cfg":{"path":"/config.json","max_bytes":65536},
          "usb":{"data":true}}}
 ```
 
@@ -81,6 +82,7 @@ The device sends one event on startup:
 | `caps.i2c_pairs` | Array of **ordered pairs**, each pair `[SCL, SDA]` |
 | `caps.uart` | `tx` array, `rx` array, and `pairs`, an array of ordered pairs (`[TX, RX]`) |
 | `caps.spi` | `groups`, the `sck/mosi/miso` pin arrays of each group, plus `max_buses`, `max_cs` and `baud_ceiling` |
+| `caps.cfg` | The device-side config vault: `path` is its file on the volume, `max_bytes` the largest single write it accepts. **The field is absent when this firmware has no `cfg.*` commands**, and the UI then hides the "Save to board" rows — the same rule that hides the HW / PIO switch when `pwm_pio` is missing |
 | `caps.usb.data` | Whether the protocol runs on its own data port (true once `boot.py` has taken effect) |
 
 ### 2.0 Where the pin numbers come from: package × board definition
@@ -129,7 +131,7 @@ The host-side rule:
 
 ## 3. Command Reference
 
-24 commands. Except for `ping` / `echo`, the `data` of a successful reply is normally the state object described in section 4.
+27 commands. Except for `ping` / `echo`, the `data` of a successful reply is normally the state object described in section 4.
 
 ### 3.1 General
 
@@ -279,6 +281,33 @@ MQTT-style switches that control what the device pushes on its own.
 
 Note the asymmetry in the ADC design: ADC has **no** polling fallback, so `adc_monitor` always reports every configured channel; subscribing only tunes the deadband and triggers the retained snapshot, it is not a switch. GPIO is strictly gated, because the 1 s `gpio.state` reconciliation poll refreshes input state anyway.
 
+### 3.9 Device-side configuration
+
+Keeps the UI's configuration in the board's own storage. These three are the exception to the rule above: their `data` is not the state object.
+
+| command | arguments | notes |
+| --- | --- | --- |
+| `cfg.get` | none | `{"text": "<snapshot JSON, or null>", "path": ..., "bytes": n}`; `bytes` is only present when the file exists. A missing file is `text: null`, not an error |
+| `cfg.save` | `text`(string) | Write. Returns `{"bytes": n, "path": ...}` |
+| `cfg.clear` | none | Delete. Returns `{"removed": true\|false, "path": ...}`; no file on the volume still counts as success |
+
+The firmware is a **vault, not a reader**: it checks that the string it was sent parses as JSON and has a `pins` array at the top level, stores it verbatim, and never interprets a field — and it does **not** program its own pins from it at boot. That is what keeps exactly one owner of the snapshot format (the front-end's `src/ui/model/store.ts`) and makes the exported file, the browser copy and this third copy on the board the same bytes. A firmware update can therefore lose a user's work by being unable to read it.
+
+Error strings, with the command that raises them:
+
+| command | error | raised when |
+| --- | --- | --- |
+| `cfg.save` | `need args.text` | `text` is missing or is not a string |
+| `cfg.save` | `config is not JSON` | the string does not parse as JSON |
+| `cfg.save` | `not a PicoHarness snapshot` | it parses, but is not an object with a `pins` array — usually a hand-edit that broke the shape |
+| `cfg.save` | `config too large: N bytes` | over `caps.cfg.max_bytes` |
+| `cfg.save` | `wrote N bytes, volume holds M` | after the rename the file on the volume is not the size just written |
+| `cfg.get` | `/config.json is N bytes, over the 65536 limit` | the stored file is implausibly large — reported before it is read |
+
+The write goes through `config.json.tmp`, then removes the old file, then renames, re-checks the
+byte count on the volume and calls `os.sync()`: a power cut or an unplugged cable mid-save leaves
+either the complete old config or the complete new one, never half a file.
+
 ---
 
 ## 4. The state Object
@@ -350,3 +379,5 @@ If the UI reports `unknown cmd: xxx`, or the `gpio.state` reply is missing field
 When an old firmware has no `caps.i2c_pairs` / `caps.uart` / `caps.spi`, the host's pin validation relaxes and lets the choice pass. The device is the final arbiter anyway, and a pairing that does not work reports a clear error. SPI is the clearest case: without `caps.spi.groups` any pin combination can be placed, and it is `spi.cfg`'s "not a routable set" error that closes the loop; the CS and bus limits fall back to their defaults of 4 lines and 2 buses, and the UI stops filtering the clock presets by ceiling.
 
 A missing `caps.pwm_pio` takes the other route: not "let it pass" but "hide the feature". No capability table means no PIO generator on the board, so the HW | PIO switch never appears, and a stored PIO channel is demoted back to a hardware slice and clamped into the hardware window (1–30,000,000 Hz) rather than sent as a request the board cannot honour. The `pwm.cfg` the host sends still carries `backend:"hw"`; an old firmware that does not know the argument simply ignores it. The window itself is computed from that table, both ends by exact division, so a new firmware needs no matching edit in the host.
+
+`caps.cfg` follows that same route. Without it the three rows — Save to board, Load from board, Delete board config — are not in the menu and no `cfg.*` is ever sent, so an old `code.py` is never handed a command it cannot answer: the user sees "these entries are not there", not a line of `unknown cmd`.

@@ -5,6 +5,37 @@ repository commit. UI and firmware must be used as a matched pair: an old firmwa
 recognise new commands and answers "unknown cmd".
 
 
+[20261014 0.1.19-cfg]
+
+The configuration has a third home: the board's own volume. There used to be two — browser localStorage and the JSON file you
+export by hand — and this version adds G:\config.json with `cfg.get` / `cfg.save` / `cfg.clear`. `ready.caps` gains `cfg`
+(`path` plus `max_bytes`, the limit being 65536).
+
+The firmware is a vault, not a reader. `cfg.save` only checks that what it was sent parses as JSON with a `pins` array at the
+top level, then stores it verbatim: it interprets no field and **does not program its own pins from it at boot**. The snapshot
+format therefore keeps its single owner (`src/ui/model/store.ts`), and the exported file, the browser copy and this third copy
+on the board are the same bytes — a firmware update cannot lose a user's work by failing to understand it. Writing goes through
+a temporary file, a rename, a re-read of the byte count and `os.sync()`, so a power cut or an unplugged cable mid-save leaves
+either the complete old config or the complete new one, never half a file.
+
+The **Config ▾** menu gains a divider and three rows (Save to board / Load from board / Delete board config), and clicking
+**Connect** resolves the starting configuration this way: a board file plus an empty workbench loads silently with one console
+line; two copies that match, or no board file at all, say nothing; two different non-empty copies ask first, and Cancel keeps
+the browser's with a note that the board's copy was untouched. The question appears only on Connect — pressing RESET or saving
+`code.py` while the link is up does not re-ask what you just answered. The board's copy **changes only when you save it**:
+loading never writes back, and clearing the configuration leaves it alone. Firmware without `caps.cfg` shows none of the three
+rows, so it is never handed a command it cannot answer — the same rule that hides the HW/PIO switch when `caps.pwm_pio` is
+missing.
+
+Consistency fix outside the protocol: the mock used to report every GPIO mask as zero in `gpio.state`, so any bound pin looked
+like drift once a second and re-sent a `gpio.cfg` the mock did not implement — a smoke test filled the console with
+`unknown cmd: gpio.cfg`. The mock now keeps an owner table too, which makes the GPIO lane testable offline.
+
+Known limitation: Web Serial cannot delete a file on the volume, so "Delete board config" only removes the path code.py knows
+about. Taking G:\config.json off the volume for good is still a trip to Explorer, though reflashing a UF2 or formatting the
+volume removes it along with everything else.
+
+
 [20261013 0.1.18-pio]
 
 PWM gains a second generator: a PIO state machine doing its own counting. The measured floor of a hardware

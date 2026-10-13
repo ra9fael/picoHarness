@@ -113,6 +113,7 @@ tabs, SPI bus lane on the measured rp2 pin groups (half buses, up to 4 CS per bu
 debug console (monitor / REPL / copy and export), browser-side configuration persistence with an
 export/import/clear menu, bilingual UI, dual CDC (protocol on its own port, parallel nonce-ping port
 identification with cached roles shown in the status bar and an auto-attached log port, REPL without
-re-picking ports).
+re-picking ports), and a device-side `config.json` — a third copy on the board's volume, written only
+when you save it, resolved at connect time as board > browser > empty with a question only on a real conflict.
 
-Next: device-side `config.json` restore on boot, standalone error panel.
+Next: standalone error panel.

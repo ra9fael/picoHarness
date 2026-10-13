@@ -64,6 +64,12 @@ there, because the pin arbiter lives in code.py and boot.py would grab the seria
 If G: has no lib/, circup did not install successfully and code.py will fail to start with an
 ImportError.
 
+"Save to board" in the UI writes G:\config.json (through config.json.tmp, then a rename). Web
+Serial has no way to delete a file on the volume, so outside cfg.clear that file is removed by
+hand: open the CIRCUITPY volume in Explorer and delete it. code.py never touches it unless asked
+to read it, and reflashing a UF2 or formatting the volume takes it with the rest. It is a note,
+not a program — nothing is applied at boot, so the pins still come up unconfigured.
+
 With dual CDC the board shows up as two COM ports: the console port belongs to CircuitPython
 (banner, print, tracebacks, REPL) and the data port runs this project's JSON-lines protocol and
 binary frames. Both share one VID/PID (0x2E8A:0x000B), so neither Device Manager nor
@@ -131,6 +137,7 @@ The UI sends a new command and the device answers "unknown cmd", or the gpio.sta
 missing a new field, or ready.caps has no uart/i2c_pairs/spi — that is not a frontend bug, it means
 G:\code.py is still the old version. Compare the VERSION string in the device-side code.py with
 the source and copy the file once more.
+The three "board" rows missing from the Config menu is the same criterion: ready.caps has no cfg.
 Only one COM port appears, or ready.caps.usb.data is false — G:\boot.py was not copied, or the
 board was not hard-reset afterwards (Ctrl-D does not count).
 ready.caps.spi disagreeing with what a sweep would find — that is the static SPI_GROUPS table, a full
