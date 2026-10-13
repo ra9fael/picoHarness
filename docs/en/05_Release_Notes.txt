@@ -5,6 +5,56 @@ repository commit. UI and firmware must be used as a matched pair: an old firmwa
 recognise new commands and answers "unknown cmd".
 
 
+[20261013 0.1.18-pio]
+
+PWM gains a second generator: a PIO state machine doing its own counting. The measured floor of a hardware
+slice has always been 9 Hz (1..8 Hz all run at 9) and anything below 1 Hz was rejected outright; this version
+pushes the floor to 0.0174553 Hz with an 8-instruction PIO program. Each SM tick advances one step, high and
+low each get a 16-bit counter, and a period spends a fixed 8 steps on top, so the measured SM clock window of
+2288 Hz - 150 MHz becomes 0.0174553 - 15,000,000 Hz of output frequency. On the board: one channel holds steady
+at 0.1 Hz (reported 0.099986 Hz, 0.014 % off), GP0..GP11 all run 0.1 Hz simultaneously, and a thirteenth channel
+is refused with `RuntimeError: no free PIO state machine (12/12 in use)`. The hardware path was cross-checked on
+the same run: GP14 asked for 5 Hz still reports hfreq 9.
+
+Neither window endpoint is a hard-coded number. ready.caps gains `pwm_pio`: `pins` (every RP2350 GPIO is in the
+PIO matrix, so this is the addressable set itself), `max_sm`, and the five window parameters `tick_cycles`,
+`fixed_cycles`, `counters`, `clk_min`, `clk_max`; the host computes the limits as clk_min/(2*counters+fixed) and
+clk_max/(fixed+2). A different chip or instruction stream needs no matching host edit. When
+`lib/adafruit_pioasm.mpy` is absent, `pwm_pio` is `null` altogether - rp2pio is built into the RP2 build, only
+the on-device asm assembler is external - and the omission is not fatal: code.py runs, the UI hides the HW/PIO
+choice, and the hardware slices are unaffected.
+
+Protocol changes: `pwm.cfg` gains `backend` (`"hw"` default / `"pio"`); `hw` frequencies remain integer-only,
+`pio` accepts fractions, and crossing either edge reports `below PIO floor` / `above PIO ceiling`. The state
+object gains `cfg_pio_pwm` (which PWM channels the PIO generator drives) and `pio_sm_free` (the budget is
+per chip, not per pin), and each `pwm.<pin>` entry gains `be`. `pwm.stop` tears down both generators and hands
+the state machine back to the budget.
+
+Changing frequency and changing backend both deinit and rebuild, and that is not a style choice: a running
+state machine keeps shipping from its 4-deep TX FIFO, measured at five periods of latency for a fresh count
+(four even after restart()), so the machine is rebuilt and armed before it runs and the very first period uses
+the new parameters. An SM whose constructor raises still claims its pin until reset yet never returns the
+budget, so the error names the pin (`GP%d PIO start refused`) instead of letting the next attempt on that pin
+read as a separate, unrelated failure.
+
+Host side: a HW | PIO segmented control sits left of the frequency field, chosen per channel and defaulting to
+hardware. A refusal is written under the offending chip only (red text plus one log line) and the UI never
+switches the channel back to HW for you - the choice belongs to the user, and `cfg_pio_pwm` reports the truth.
+Frequency clamping now rounds inward at the edges: the endpoints are exact divisions (the PIO floor is
+0.01745533...), and rounding one to nearest asks the firmware for a clock below its minimum, which this release
+fixes. The persisted snapshot gains a `b` field per PWM channel (absent/0 = hardware, 1 = PIO), old snapshots
+read as hardware, and a stored PIO channel is demoted back to hardware and clamped into the hardware window when
+the device reports no `caps.pwm_pio`.
+
+Documentation: 01 section 2.2 covers the missing-library behaviour and section 4.4 gains 4.4.1 (the HW/PIO
+comparison table, both endpoint formulas, the 12-channel run, the refusal text verbatim); 02 documents the new
+caps/state/command fields and where the window comes from; 03 adds the budget-exhausted, out-of-window and
+missing-pioasm cases to its error table; 04 records the measured PIO constraints. Verification:
+`tools/pio_fw_check.py` passes on hardware (12 coexisting channels, the refusal, the mask, the budget returning).
+`tools/pio_pwm_probe.py`, `tools/pio_bg_probe.py`, `tools/pio_stage0a.py` and `tools/pio_pwm_read.py` are the
+probes behind these numbers, and `tools/make_mock.mjs` injects the mock into dist/index.html to produce a
+clickable offline mock.html.
+
 [20261013 ui-bus-badges]
 
 Firmware version unchanged (0.1.17-gp29); this entry is host-side only.

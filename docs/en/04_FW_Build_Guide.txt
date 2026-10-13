@@ -26,6 +26,12 @@ into the board's lib directory with circup:
     circup install asyncio
 
 Afterwards lib/asyncio/ and lib/adafruit_ticks.mpy should exist under the CIRCUITPY volume.
+The PIO PWM generator additionally needs lib/adafruit_pioasm.mpy (circup install adafruit_pioasm).
+The repo keeps a copy of the same file at src/fw/lib/adafruit_pioasm.mpy (the circup-installed original,
+sha256 27e3d1fd56ec66c63119acae6b3ef9da5fbe25ed8308647bd549206aa9bf4687) for hosts where circup is not an option.
+rp2pio itself is already compiled into the CircuitPython 10.3.1 RP2 build, so there is nothing to install for
+it; without adafruit_pioasm, code.py still runs, caps simply reports no pwm_pio and the UI hides the HW/PIO
+choice.
 From now on, touch device libraries only through circup; never copy them by hand.
 
 
@@ -160,6 +166,17 @@ Four constraints established on real hardware, known before touching the schedul
    sys.stdin is a text object. Whenever one code path feeds both, decode with
    decode("utf-8", "replace") first — otherwise the same buffer raises TypeError and, on the
    fallback path, splits multi-byte characters.
+
+The PIO PWM path has its own set of measured findings (tools/pio_pwm_probe.py, tools/pio_bg_probe.py,
+tools/pio_fw_check.py): rp2pio is built in, and assembling asm on the board is lib/adafruit_pioasm.mpy's job,
+so the firmware has no host-side build step at all; one 8-instruction program spends a fixed 8 ticks per
+period, the two count registers are 16 bits each, and the measured SM clock window of 2288 Hz – 150 MHz
+therefore becomes 0.0174553 – 15,000,000 Hz of output frequency. All 12 SMs on the chip can coexist (Stage 5
+ran 12 channels at 0.1 Hz at once). A running SM keeps honouring its 4-deep TX FIFO, so a count written
+straight in only lands five periods later; pwm.cfg consequently deinits and re-arms every PIO channel and then
+uses background_write(loop=...). An SM whose constructor raises still claims its pin until reset but does not
+give the budget back, so the error names the pin — otherwise the next attempt on that pin looks like a new,
+unrelated failure. A pad hosts one generator at a time, so switching backend must tear the old one down first.
 
 Also: writing .frequency on an rp2 fixed-frequency PWMOut raises Invalid variable_frequency, so the
 firmware deinits and rebuilds the object when the frequency changes. The mpy asyncio port is a

@@ -23,6 +23,11 @@ npm：随 Node 附带
     circup install asyncio
 
 装完 CIRCUITPY 卷下应存在 lib/asyncio/ 与 lib/adafruit_ticks.mpy。
+PIO 那台 PWM 发生器还要 lib/adafruit_pioasm.mpy（circup install adafruit_pioasm）。
+仓库在 src/fw/lib/adafruit_pioasm.mpy 存了一份同文件的副本（circup 装出来的原件，sha256
+27e3d1fd56ec66c63119acae6b3ef9da5fbe25ed8308647bd549206aa9bf4687），装不了 circup 时直接拷它。
+rp2pio 本身已经编进 CircuitPython 10.3.1 的 RP2 构建里，不用装；缺 pioasm 时 code.py 照跑，
+只是 caps 里没有 pwm_pio，界面的 HW/PIO 选择不出现。
 以后动设备库一律走 circup，不要手工拷贝。
 
 
@@ -135,6 +140,15 @@ adc_streamer 波形批量流。每个协程先 create_task 拿到 Task 句柄，
 4. usb_cdc.Serial 是二进制流：read() 给 bytes、write() 收 bytes-like，
    而 sys.stdin 是文本对象。两者混在一条读取路径里时必须先 decode("utf-8","replace")，
    否则同一处缓冲会同时炸出 TypeError 和半个中文行。
+
+PIO 这路 PWM 的几条实测结论（tools/pio_pwm_probe.py、tools/pio_bg_probe.py、tools/pio_fw_check.py）：
+rp2pio 已内置，板上现拼 asm 靠的是 lib/adafruit_pioasm.mpy，所以固件里没有任何 host 端构建步骤；
+一段 8 指令的程序，一个周期固定花 8 个 tick，两个计数寄存器各 16 位，于是 SM 时钟实测窗口
+2288 Hz–150 MHz 换算成频率就是 0.0174553–15,000,000 Hz，全片 12 个 SM 可共存（Stage 5 实测 12 路
+0.1 Hz 同时输出）。正在跑的 SM 会继续照它那条 4 深的 TX FIFO 出货，直接写新计数要等五个周期才见效，
+所以 pwm.cfg 对 PIO 通道一律 deinit + 重新 arm，再上 background_write(loop=...)。
+构造函数抛异常的 SM 会把引脚占到复位为止，但不回补预算——报错时把脚号写进消息，别让下一次尝试
+看起来像另一个新故障。一个 pad 只能挂一种发生器，切 backend 必须拆干净重建。
 
 另外：rp2 固定频率模式的 PWMOut 写 .frequency 会抛 Invalid variable_frequency，
 固件改成频率变化时 deinit 重建。mpy 的 asyncio 端口本身是队列轮转调度器，

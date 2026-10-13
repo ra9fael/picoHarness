@@ -52,6 +52,11 @@ circup 会自动把 `asyncio` 和它依赖的 `adafruit_ticks` 装进 CIRCUITPY 
 不想装 circup 的话，手动下载 [Library Bundle](https://circuitpython.org/libraries)，
 把里面的 `asyncio` 目录和 `adafruit_ticks.mpy` 复制到 `CIRCUITPY/lib/`。
 
+PIO 那台 PWM 发生器还要 `adafruit_pioasm`（`circup install adafruit_pioasm`，或把仓库里备好的
+`src/fw/lib/adafruit_pioasm.mpy` 复制进 `CIRCUITPY/lib/`）。它**不是致命缺件**：`rp2pio` 已经编进
+RP2 的固件里，只有拼装 PIO 文本的 `adafruit_pioasm` 要外挂，没有它 `code.py` 照跑，
+只是 `caps` 里不出现 `pwm_pio`，界面上也就没有 HW / PIO 这个选择，PWM 仍能用硬件 slice。
+
 ### 2.3 放固件
 
 固件是两个文件，都复制到 CIRCUITPY 卷的根目录，覆盖同名文件：
@@ -206,7 +211,41 @@ I2C 会按序对算（SCL=GP29 时只有同一外设那一侧的偶数脚亮）�
 实测下限是 9 Hz：你填 1、5、8 Hz，板子都跑 9 Hz；高频也会量化（1000→990、2000→2035）。
 固件把 slice 真实运行的频率随状态一起回报，界面于是把那个频率框描成琥珀色，
 悬停能看到"设定 X Hz，硬件实际 Y Hz"，偏差超过 5% 时还会在日志里写一条。
-低于 1 Hz 的值（例如 0.5）不发放，板子直接回 `freq < 1 Hz: PWMOut takes whole hertz`。
+
+#### 4.4.1 HW / PIO：两种发生器自己选
+
+频率框左边是 **HW | PIO** 两个按钮（只在固件上报了 `caps.pwm_pio` 时出现），
+它们决定这一路由什么硬件产生波形：
+
+| | HW = 硬件 PWM slice | PIO = 状态机自己数 |
+| --- | --- | --- |
+| 频率窗口 | 1 – 30,000,000 Hz | 0.0174553 – 15,000,000 Hz |
+| 慢到什么程度 | 实测 1～8 Hz 全都跑 9 Hz | 实测 0.1 Hz 一路稳跑（回报 0.099986 Hz） |
+| 占用 | 同 slice 的两个脚共用一个频率 | 每路独占一个状态机，RP2350 一共 12 个 |
+| 引脚 | `caps.pwm` | `caps.pwm_pio.pins`（RP2350 每个 GPIO 都有 PIO 矩阵） |
+
+两个窗口的端点**都不是写死在界面里的**：下限是 `clk_min / (2×counters + fixed_cycles)`
+= 2288/(2×65535+8) = 0.0174553 Hz，上限是 `clk_max / (fixed_cycles + 2)` = 150 MHz/10
+= 15 MHz，五个数全部来自板子的 `caps.pwm_pio`。换一颗芯片、改一段指令，界面跟着变。
+输入超出窗口时会被夹回窗口边上，夹的方向永远朝里——0.0174553 这种端点如果按四舍五入落到
+0.017455，固件就要按"时钟低于下限"退回，所以界面向内取整。
+
+PIO 这一路的频率框照样会描琥珀色：它回报的是 `SM 时钟 / 一个周期的 tick 数`，
+也就是脚上真正出现的频率，不是你填的那个数。12 路同时开是实测过的
+（GP0～GP11 各 0.1 Hz、各 50 %，全部正常输出）；第 13 路会被拒：
+
+```
+RuntimeError: no free PIO state machine (12/12 in use)
+```
+
+这条错误只写在那一颗芯片上（框下方红字 + 日志一行），别的脚不受影响；界面不会替你
+把这一路改回 HW——那个选择是你的，状态回报里的 `cfg_pio_pwm` 会诚实地显示板子上到底是
+哪几路在跑 PIO。释放任意一路（拖回池中或点 ×）后再点一次 PIO 就能补上。
+
+切发生器时这一路的频率会被夹进新窗口（HW→PIO 不会把频率拉低，PIO→HW 会把 0.1 Hz 抬到
+1 Hz），并且固件一定会把这台发生器拆了重建：一个正在跑的状态机仍在照它那条 4 深的
+TX FIFO 出货，直接写新数值要等五个周期才见效，所以 `pwm.cfg` 对 PIO 通道一律
+`deinit` + 重新 `arm`，第一个周期就是新参数。
 
 **一个坑要提前知道**：rp2 的硬件 PWM 按 slice 分组，一个 slice 只有一台计数器，
 **同 slice 的两个脚只能共用一个频率**。分组是数据手册 / pico-sdk `gpio.h` 里 F4 那一列写死的，
@@ -221,7 +260,8 @@ GP24/GP25 是 slice 4，GP28/GP29 是 slice 6。这就是"同一个通道有时�
 第二个脚如果要求不同的频率，`pwm.cfg` 会失败并回
 `RuntimeError: Conflicting settings for shared resource`——固件不会去偷偷改第一个脚的频率，
 而是把这个脚退还给引脚池，界面上那条命令会显示失败。需要两个独立频率时，选算出来不同 slice 的脚
-（例如 GP7 是 slice 3、GP11 是 slice 5）。
+（例如 GP7 是 slice 3、GP11 是 slice 5），**或者干脆把其中一路切到 PIO**：
+PIO 数的是自己的 tick，跟 slice 分组没有关系。
 
 ### 4.5 ADC
 
@@ -440,8 +480,8 @@ REPL 只动控制台口，**数据口的连接不会被断开**，所以退出 R
 | 事项 | 说明 |
 | --- | --- |
 | 哪些脚进池子 | = 封装的 GPIO 数（RP2350A 30 个 / RP2350B 48 个，`platform_defs.h`）∩ 板级 `pins.c` 声明的脚。号码从声明名解析：`GPn` 直接读，只有 ADC 别名的（如 `A3`）按 `ADC_BASE + 通道号` 算出来，所以 Pico 2 的 GP29 在池子里。池子可能有洞（Pico 2 W 不声明 GP23/24/25），固件和界面都按 `caps.gp` 走，不写死脚数 |
-| PWM 同 slice 共频 | 同一 slice 两个脚改频率会互相覆盖，需要独立频率就换脚。slice = `(n//2) mod 8`（n≤31）/ `8+((n-32) mod 8)//2`（n≥32），偶 A 奇 B；**GP16 起会绕回 slice 0**，"不相邻"不等于"不同 slice" |
-| PWM 频率下限 | 硬件只接受整数 Hz，实测最低 9 Hz（1..8 Hz 都跑 9）。低于 1 Hz 板子直接报错；1..8 由固件回报真实频率，界面把频率框标琥珀并写日志 |
+| PWM 同 slice 共频 | 同一 slice 两个脚改频率会互相覆盖，需要独立频率就换脚，**或把其中一路切到 PIO**（每路独占状态机，不看 slice 分组）。slice = `(n//2) mod 8`（n≤31）/ `8+((n-32) mod 8)//2`（n≥32），偶 A 奇 B；**GP16 起会绕回 slice 0**，"不相邻"不等于"不同 slice" |
+| PWM 频率下限 | `hw` 只接受整数 Hz，实测最低 9 Hz（1..8 Hz 都跑 9），低于 1 Hz 板子直接报错；1..8 由固件回报真实频率，界面把频率框标琥珀并写日志。要低频就切 PIO：窗口 0.0174553–15,000,000 Hz，实测 0.1 Hz 稳跑，代价是每路占一个状态机（全片 12 个） |
 | ADC 脚位由封装定 | QFN-60 是 GP26..GP29（ADC0..3），QFN-80 是 GP40..GP47（ADC0..7）；Pico 2 的 GP29 被 IP 占用作 VSYS/3 监测——它以 `A3` 的身份在池子里，读上来的就是板供电除以 3 |
 | I2C 必须有上拉 | 空闲时两线不拉高就报 `No pull up found`，这是接线问题不是软件问题 |
 | I2C 引脚对固定 | SCL 奇、SDA 偶、`SDA ≡ SCL-1 (mod 4)`（不要求相邻），硬件两路实例，看角标 S/D 即可 |

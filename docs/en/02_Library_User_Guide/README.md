@@ -2,7 +2,7 @@
 
 This is a quick reference, not a tutorial. If you want to know how to use the harness, read the [01 User Manual](../01_GUIApp_FW_Manual/README.md) first.
 
-Every external interface of firmware version 0.1.16-spi.
+Every external interface of firmware version 0.1.18-pio.
 
 ---
 
@@ -57,9 +57,12 @@ The host does **byte-level demultiplexing of the mixed stream**: it scans for th
 The device sends one event on startup:
 
 ```json
-{"evt":"ready","app":"PicoHarness","version":"0.1.16-spi",
+{"evt":"ready","app":"PicoHarness","version":"0.1.18-pio",
  "cp":[10,3,1],"pins":29,"gp":[0,1,2,...,22,26,27,28],
- "caps":{"pwm":[...],"adc":[...],"i2c_pairs":[[scl,sda],...],
+ "caps":{"pwm":[...],"pwm_pio":{"pins":[...],"max_sm":12,"tick_cycles":1,
+                                            "fixed_cycles":8,"counters":65535,
+                                            "clk_min":2288,"clk_max":150000000},
+         "adc":[...],"i2c_pairs":[[scl,sda],...],
          "uart":{"tx":[...],"rx":[...],"pairs":[[tx,rx],...]},
          "spi":{"groups":[{"sck":[...],"mosi":[...],"miso":[...]},...],
                 "max_buses":2,"max_cs":4,"baud_ceiling":75000000},
@@ -73,6 +76,7 @@ The device sends one event on startup:
 | `pins` | Highest addressable pin number + 1 (it sizes the arrays); **not** a count of pins |
 | `gp` | Array of the pin numbers this board can actually **reach** — computed from the Pin objects `board` declares, numbered out of the declared name, with an alias-only ADC pin (here `A3`) numbered `ADC_BASE + channel`; may have holes, and the UI chip pool follows it |
 | `caps.pwm` | Array of pin numbers capable of PWM |
+| `caps.pwm_pio` | The capability table of the PIO PWM generator: `pins` are the pin numbers a PIO state machine can be hung on, `max_sm` is the state-machine budget for the **whole chip**, and the remaining five numbers (`tick_cycles`, `fixed_cycles`, `counters`, `clk_min`, `clk_max`) define its frequency window. **The field is `null` when this firmware has no PIO generator** (e.g. `lib/adafruit_pioasm.mpy` was not installed), and the host then hides the HW / PIO choice |
 | `caps.adc` | Array of pin numbers capable of ADC, including the virtual channel `100` (internal temperature) |
 | `caps.i2c_pairs` | Array of **ordered pairs**, each pair `[SCL, SDA]` |
 | `caps.uart` | `tx` array, `rx` array, and `pairs`, an array of ordered pairs (`[TX, RX]`) |
@@ -91,7 +95,7 @@ The firmware reads this set off `board` at boot (`gp`), and every capability arr
 
 How a hole behaves on the wire: the range check uses the contiguous bound `0..NUM_PINS-1`, so a number inside that span that the board definition never declared passes the range check and then fails in `_pin()` as `ValueError: board has no GP23`; the `gpio.cfg` mask expands pin by pin and simply skips a hole, no error. The UI renders from `caps.gp`, so ordinary use never reaches either path.
 
-The PWM / ADC / I2C-pair parts of `caps` are **probed** — build an object on every pin, enumerate the candidate ordered pairs and actually build them — while UART is **computed from the documentation** at boot: even pins TX, odd pins RX, instance `((n+4)//8) % NUM_UARTS`, all three taken from CircuitPython's own algorithm in `common-hal/busio/UART.c`. SPI is covered below. The sweep runs once at boot and the result is cached; `hello` serves that cache.
+The PWM / ADC / I2C-pair parts of `caps` are **probed** — build an object on every pin, enumerate the candidate ordered pairs and actually build them — while UART is **computed from the documentation** at boot: even pins TX, odd pins RX, instance `((n+4)//8) % NUM_UARTS`, all three taken from CircuitPython's own algorithm in `common-hal/busio/UART.c`. SPI is covered below. The sweep runs once at boot and the result is cached; `hello` serves that cache. `caps.pwm_pio.pins` is on none of those lists: the PIO matrix reaches every RP2350 GPIO, so the array is simply the addressable pin set, and the five window numbers are constants of the chip and measured properties of this build, reported verbatim rather than probed per pin.
 
 **SPI is the one static table**: the GP0..GP28 rows of `SPI_GROUPS` were measured combination by combination with `tools/spi_probe.py` on CircuitPython 10.3.1 / Pico 2 (53 accepted, 1571 `Invalid pins`) and agree **row for row** with the F1 column of pico-sdk `hardware/gpio.h`; the GP30..GP47 rows come from that same table (QFN-80-only rows), cannot be reached on a 30-pin board and therefore never reach the UI — the firmware projects the table onto `gp` before sending `caps.spi`. There is no boot-time SPI sweep: the exhaustive version is 1600+ constructor calls and takes minutes, while the answer is a property of the silicon, not of the wiring, so scanning would never change it.
 
@@ -149,12 +153,15 @@ A mask bit is `1 << pin number`. The pulls are tri-state: a bit set in `pd` is p
 
 | command | arguments | notes |
 | --- | --- | --- |
-| `pwm.cfg` | `pin`, `freq`(default 1000), `duty`(default 0.5) | Start or re-parameterize. `freq` is in Hz and takes integer values only; below 1 it is rejected outright. `duty` takes 0..1 |
-| `pwm.stop` | `pin` | Stop and release the pin |
+| `pwm.cfg` | `pin`, `freq`(default 1000), `duty`(default 0.5), `backend`(default `"hw"`) | Start or re-parameterize. `duty` takes 0..1; `backend` is `"hw"` (hardware slice) or `"pio"` (state machine). For `hw`, `freq` is in Hz and takes integer values only — below 1 it is rejected outright with `freq < 1 Hz: PWMOut takes whole hertz`. For `pio`, `freq` may be fractional and its window comes from the five numbers in `caps.pwm_pio`; outside it the reply is `... below PIO floor ...` / `freq above PIO ceiling ...` |
+| `pwm.stop` | `pin` | Stop and release the pin; both generators are torn down (a PIO channel gives its state machine back to the budget) |
 
 When the frequency changes, the firmware `deinit`s the object and rebuilds it. On rp2, writing `.frequency` directly raises `Invalid variable_frequency`, so this works around a defect in the hardware library.
 
-The rp2 divider cannot honour every integer you ask for: it only generates 125 MHz/(div×(top+1)), so the measured floor is 9 Hz (1..8 Hz all land on 9) and higher requests quantize (1000→990, 2000→2035). The reply therefore carries `pwm.<pin>.hfreq` = the frequency the slice really runs at, next to `freq` = what you requested; the UI turns the box amber and writes one log line when they differ.
+A different `backend` also forces a rebuild: a pad can host only one generator, and a running state machine is still shipping
+from its 4-deep TX FIFO, so a count written straight in would only take effect five periods later.
+
+The `hw` backend's divider cannot honour every integer you ask for: it only generates 125 MHz/(div×(top+1)), so the measured floor is 9 Hz (1..8 Hz all land on 9) and higher requests quantize (1000→990, 2000→2035). The reply therefore carries `pwm.<pin>.hfreq` = the frequency the generator really runs at, next to `freq` = what you requested; the UI turns the box amber and writes one log line when they differ.
 
 Two pins of one slice (GP24/GP25 = slice 4, since slice = `(n // 2) mod 8`) cannot hold separate frequencies: the second `pwm.cfg` fails with `RuntimeError: Conflicting settings for shared resource`, and the firmware hands the pin's ownership back instead of leaving it half-claimed. See [01 User Manual](../01_GUIApp_FW_Manual/README.md#44-pwm).
 
@@ -287,7 +294,9 @@ What `gpio.state` returns, and the `data` of most other commands.
 | `cfg_pd` | bit mask | Input pins with pull-down enabled |
 | `cfg_pn` | bit mask | Input pins set to no pull |
 | `cfg_pwm` | bit mask | Pins held by PWM |
-| `pwm` | object | `{"<pin>": {"freq": f, "hfreq": h, "duty": d}}` — `hfreq` is what the slice actually generates |
+| `cfg_pio_pwm` | bit mask | Which of those pins the PIO state machine is driving (a subset of `cfg_pwm`) |
+| `pio_sm_free` | int | How many state machines are still free; the budget belongs to the **whole chip**, not to a pin |
+| `pwm` | object | `{"<pin>": {"freq": f, "hfreq": h, "duty": d, "be": "hw"|"pio"}}` — `be` is the generator in use, and `hfreq` is the frequency it actually produces (a hardware slice can only land on whole hertz; PIO divides its SM clock by a cycle count) |
 | `cfg_adc` | bit mask | Pins held by ADC, **physical** pins only (the virtual temperature channel is excluded) |
 | `adc_temp` | bool | Whether the temperature channel is enabled |
 | `cfg_i2c` | bit mask | Pins held by I2C |
@@ -297,7 +306,7 @@ What `gpio.state` returns, and the `data` of most other commands.
 | `cfg_spi` | bit mask | Pins held by SPI, **including every CS** |
 | `spi` | array | `[{"id":i,"sck":n,"mosi":n,"miso":n,"cs":[n,...],"baud":h,"hbaud":h,"mode":m}, ...]` (a side that is not connected is -1) |
 
-The host compares this state against its own expectations and re-sends the configuration whenever it finds drift. That is the mechanism that lets the board heal itself even after it was rebooted. The bus arrays (`i2c` / `uart` / `spi`) take part in the drift comparison as a signature built from sorted `id:member,member,...` entries; the SPI signature carries the CS order, `baud` and `mode`, so losing one CS line also reads as drift. `hbaud` is the clock the divider actually reached, while the value you requested stays in `baud` — the two may differ.
+The host compares this state against its own expectations and re-sends the configuration whenever it finds drift. That is the mechanism that lets the board heal itself even after it was rebooted. The bus arrays (`i2c` / `uart` / `spi`) take part in the drift comparison as a signature built from sorted `id:member,member,...` entries; the SPI signature carries the CS order, `baud` and `mode`, so losing one CS line also reads as drift. `hbaud` is the clock the divider actually reached, while the value you requested stays in `baud` — the two may differ. PWM drift looks at both halves of the lane: `cfg_pwm` says which pins run, `cfg_pio_pwm` says which of them the PIO generator owns — the pin mask alone would call a channel that silently fell back to a hardware slice healthy.
 
 ---
 
@@ -339,3 +348,5 @@ The `version` field is the first thing to compare when deciding whether the devi
 If the UI reports `unknown cmd: xxx`, or the `gpio.state` reply is missing fields such as `cfg_uart` / `uart`, then almost always **the board is still running an old `code.py`**; the host is not at fault. Check `version` first, and re-copy `code.py` if needed.
 
 When an old firmware has no `caps.i2c_pairs` / `caps.uart` / `caps.spi`, the host's pin validation relaxes and lets the choice pass. The device is the final arbiter anyway, and a pairing that does not work reports a clear error. SPI is the clearest case: without `caps.spi.groups` any pin combination can be placed, and it is `spi.cfg`'s "not a routable set" error that closes the loop; the CS and bus limits fall back to their defaults of 4 lines and 2 buses, and the UI stops filtering the clock presets by ceiling.
+
+A missing `caps.pwm_pio` takes the other route: not "let it pass" but "hide the feature". No capability table means no PIO generator on the board, so the HW | PIO switch never appears, and a stored PIO channel is demoted back to a hardware slice and clamped into the hardware window (1–30,000,000 Hz) rather than sent as a request the board cannot honour. The `pwm.cfg` the host sends still carries `backend:"hw"`; an old firmware that does not know the argument simply ignores it. The window itself is computed from that table, both ends by exact division, so a new firmware needs no matching edit in the host.

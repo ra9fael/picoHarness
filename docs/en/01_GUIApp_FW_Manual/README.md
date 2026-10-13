@@ -53,6 +53,11 @@ match your CircuitPython.
 If you would rather not install circup, download the [Library Bundle](https://circuitpython.org/libraries) by hand and copy the
 `asyncio` directory and `adafruit_ticks.mpy` into `CIRCUITPY/lib/`.
 
+The PIO PWM generator additionally wants `adafruit_pioasm` (`circup install adafruit_pioasm`, or copy the
+`src/fw/lib/adafruit_pioasm.mpy` vendored in this repo into `CIRCUITPY/lib/`). It is **not a fatal omission**: `rp2pio` is already compiled into the RP2 build,
+only the PIO-text assembler on top of it is external. Without that file `code.py` still runs — `caps` simply reports no
+`pwm_pio`, the HW / PIO switch never appears in the UI, and PWM keeps working through the hardware slices.
+
 ### 2.3 Deploy the Firmware
 
 The firmware is two files; copy both into the root of the CIRCUITPY volume, overwriting files of the same name:
@@ -213,8 +218,44 @@ Duty cycle is a number between 0 and 1.
 125 MHz/(div×(top+1)); the measured floor is 9 Hz, so 1, 5 or 8 Hz all run at 9 Hz, and higher requests
 quantize too (1000→990, 2000→2035). The firmware reports the frequency the slice really runs at, the UI
 turns that field amber, the tooltip reads "set to X Hz, the hardware runs Y Hz", and a request that misses
-by more than 5% also writes a line to the log. Below 1 Hz the value is not sent at all; the board answers
-`freq < 1 Hz: PWMOut takes whole hertz`.
+by more than 5% also writes a line to the log.
+
+#### 4.4.1 HW / PIO: you pick which generator drives the channel
+
+Left of the frequency field sit the **HW | PIO** buttons (they only appear when the firmware reported
+`caps.pwm_pio`). They decide which hardware produces this channel's waveform:
+
+| | HW = hardware PWM slice | PIO = a state machine doing its own counting |
+| --- | --- | --- |
+| Frequency window | 1 – 30,000,000 Hz | 0.0174553 – 15,000,000 Hz |
+| How slow it goes | measured: 1–8 Hz all run at 9 Hz | measured: one channel steady at 0.1 Hz (reported 0.099986 Hz) |
+| What it occupies | the two pins on a slice share one frequency | one state machine per channel, 12 of them on the RP2350 |
+| Pins | `caps.pwm` | `caps.pwm_pio.pins` (every RP2350 GPIO is in the PIO matrix) |
+
+Neither window endpoint is **hard-coded in the UI**: the floor is `clk_min / (2×counters + fixed_cycles)`
+= 2288/(2×65535+8) = 0.0174553 Hz and the ceiling is `clk_max / (fixed_cycles + 2)` = 150 MHz/10 = 15 MHz,
+all five numbers coming from the board's `caps.pwm_pio`. Change the chip or the instruction stream and the UI follows.
+An out-of-window value is clamped onto the window edge, and always **inward** — rounding an endpoint such as
+0.0174553 to nearest gives 0.017455, which would ask the firmware for a clock below its minimum, so edges are rounded
+toward the window instead.
+
+The PIO path gets the same amber field: what it reports is `SM clock / ticks per period`, i.e. the frequency actually
+coming out of the pin, not the one you typed. Twelve channels at once is measured (GP0–GP11, 0.1 Hz and 50 % each, all
+outputting); a thirteenth is refused:
+
+```
+RuntimeError: no free PIO state machine (12/12 in use)
+```
+
+That error stays on the offending chip (red text under the field plus one log line) and no other pin is affected. The UI
+will not switch the channel back to HW for you — that choice is yours — and `cfg_pio_pwm` in the state reply honestly
+shows which channels the board is running on PIO. Free any one channel (drag it back to the pool, or press ×) and the
+PIO button works again.
+
+Switching generator re-clamps this channel's frequency into the new window (HW→PIO never lowers it, PIO→HW lifts 0.1 Hz
+to 1 Hz), and the firmware always tears the generator down and rebuilds it: a running state machine is still shipping
+from its 4-deep TX FIFO, so a fresh value written directly would only land five periods later. `pwm.cfg` therefore
+`deinit`s and re-`arm`s every PIO channel, making the very first period use the new parameters.
 
 **One trap to know up front**: rp2 hardware PWM is grouped by slice, one counter per slice, so
 **the two pins in one slice share a single frequency**. The grouping is written down in the F4 column of the
@@ -228,7 +269,8 @@ GP16/GP17 are slice 0 again, GP18/GP19 slice 1, GP24/GP25 slice 4, GP28/GP29 sli
 case: compute it from the table instead of trying. Asking the second pin for a different frequency fails with
 `RuntimeError: Conflicting settings for shared resource` — the firmware does not overwrite the first pin, it
 hands that pin back to the pool and the UI shows the command as failed. When you need two independent
-frequencies, pick pins that compute to different slices (GP7 is slice 3, GP11 is slice 5).
+frequencies, pick pins that compute to different slices (GP7 is slice 3, GP11 is slice 5) — **or put one of the
+two channels on PIO**: it counts its own ticks and never consults the slice grouping.
 
 ### 4.5 ADC
 
@@ -462,8 +504,8 @@ These are traps already stepped in, collected here to save your time.
 | Item | Detail |
 | --- | --- |
 | Which pins are in the pool | package GPIO count (RP2350A 30 / RP2350B 48, per `platform_defs.h`) ∩ the pins the board's `pins.c` declares. The number comes out of the declared name: `GPn` reads directly, and a pin that only has ADC aliases (`A3`) is numbered `ADC_BASE + channel`, which is how GP29 gets into the pool on a Pico 2. The pool may have holes (a Pico 2 W declares no GP23/24/25); firmware and UI both follow `caps.gp`, no pin count is hardcoded. |
-| PWM pins in one slice share a frequency | Changing the frequency on one pin overwrites the other. Need independent frequencies, change pins. Slice = `(n // 2) mod 8` for n ≤ 31 and `8 + ((n - 32) mod 8) // 2` for n ≥ 32, even A / odd B — **it wraps at GP16 back to slice 0**, so "not adjacent" is not the same as "not the same slice". |
-| PWM frequency floor | Integer Hz only, and the measured floor is 9 Hz (1..8 Hz all run at 9). Below 1 Hz the board rejects the command; for 1..8 the firmware reports the real frequency and the UI marks the field amber plus logs it. |
+| PWM pins in one slice share a frequency | Changing the frequency on one pin overwrites the other. Need independent frequencies, change pins — **or put one of the two channels on PIO**, which claims a state machine per channel and ignores the slice grouping. Slice = `(n // 2) mod 8` for n ≤ 31 and `8 + ((n - 32) mod 8) // 2` for n ≥ 32, even A / odd B — **it wraps at GP16 back to slice 0**, so "not adjacent" is not the same as "not the same slice". |
+| PWM frequency floor | On `hw`: integer Hz only, and the measured floor is 9 Hz (1..8 Hz all run at 9). Below 1 Hz the board rejects the command; for 1..8 the firmware reports the real frequency and the UI marks the field amber plus logs it. PIO is the way out: its window is 0.0174553 – 15,000,000 Hz, 0.1 Hz is measured steady, and the price is one state machine per channel (12 on the chip). |
 | ADC pins depend on package | QFN-60 is GP26..GP29 (ADC0..3), QFN-80 is GP40..GP47 (ADC0..7). On the Pico 2 the IP already uses GP29 as the VSYS/3 monitor — it is in the pool under its `A3` name, and reading it gives you the board supply divided by 3. |
 | I2C needs pull-ups | If neither line is held high at idle you get `No pull up found`. That is a wiring problem, not a software problem. |
 | I2C pin pairs are fixed | Hardware DW_apb_i2C, two instances: SCL odd, SDA even, `SDA ≡ SCL-1 (mod 4)` — adjacency is not required, and a pair that fails this raises `Invalid pins`. Follow the S/D badges. |

@@ -2,7 +2,7 @@
 
 这篇是速查手册，不是教程。想知道怎么用先看 [01 使用手册](../01_GUIApp_FW_Manual/README.md)。
 
-固件版本 0.1.16-spi 的全部对外接口。
+固件版本 0.1.18-pio 的全部对外接口。
 
 ---
 
@@ -66,9 +66,12 @@ payload 第一个字节是 **kind**，标识这是哪种流：
 设备启动时主动发一条事件：
 
 ```json
-{"evt":"ready","app":"PicoHarness","version":"0.1.16-spi",
+{"evt":"ready","app":"PicoHarness","version":"0.1.18-pio",
  "cp":[10,3,1],"pins":29,"gp":[0,1,2,...,22,26,27,28],
- "caps":{"pwm":[...],"adc":[...],"i2c_pairs":[[scl,sda],...],
+ "caps":{"pwm":[...],"pwm_pio":{"pins":[...],"max_sm":12,"tick_cycles":1,
+                                            "fixed_cycles":8,"counters":65535,
+                                            "clk_min":2288,"clk_max":150000000},
+         "adc":[...],"i2c_pairs":[[scl,sda],...],
          "uart":{"tx":[...],"rx":[...],"pairs":[[tx,rx],...]},
          "spi":{"groups":[{"sck":[...],"mosi":[...],"miso":[...]},...],
                 "max_buses":2,"max_cs":4,"baud_ceiling":75000000},
@@ -82,6 +85,7 @@ payload 第一个字节是 **kind**，标识这是哪种流：
 | `pins` | 最大可寻址脚号 + 1（数组维度用），**不是**引脚个数 |
 | `gp` | 本板**能取到的**脚号数组（从 `board` 声明的 Pin 对象算出，号码读自声明名，只有 ADC 别名的按 `ADC_BASE+通道` 补号）；可能有洞，界面芯片池以此为准 |
 | `caps.pwm` | 能做 PWM 的脚号数组 |
+| `caps.pwm_pio` | PIO 那台 PWM 发生器的能力表：`pins` 是能挂 PIO 状态机的脚号数组，`max_sm` 是整块芯片的状态机预算，剩下五个数（`tick_cycles`、`fixed_cycles`、`counters`、`clk_min`、`clk_max`）定出频率窗口。**这台固件没有 PIO 发生器时整个字段是 `null`**（比如 `lib/adafruit_pioasm.mpy` 没装），主机就不显示 HW / PIO 选择 |
 | `caps.adc` | 能做 ADC 的脚号数组，含虚拟通道 `100`（内部温度） |
 | `caps.i2c_pairs` | **有序对**数组，每对是 `[SCL, SDA]` |
 | `caps.uart` | `tx` 数组、`rx` 数组、`pairs` 有序对数组（`[TX, RX]`） |
@@ -126,6 +130,9 @@ payload 第一个字节是 **kind**，标识这是哪种流：
 UART 是**按文档规则现算**的：偶发 TX、奇发 RX、实例号 `((n+4)//8) % NUM_UARTS`，
 这三条都是 CircuitPython `common-hal/busio/UART.c` 自己的算法，固件只是把它跑一遍；
 SPI 见下面。探测和计算只在开机时做一次并缓存，`hello` 复用的就是这份缓存。
+`caps.pwm_pio.pins` 不在这几条之列：PIO 矩阵覆盖 RP2350 每一个 GPIO，所以它直接取可寻址脚号集合。
+那五个窗口参数也一次都不探测，固件把已知事实原样上报——`counters`/`max_sm` 是芯片参数，
+`fixed_cycles` 由这段指令的形状数出来，`clk_min`/`clk_max` 是在这块板子上实测到的 SM 时钟边界。
 
 **SPI 是唯一的静态表**：`SPI_GROUPS` 的 GP0..GP28 行是 `tools/spi_probe.py` 在
 CircuitPython 10.3.1 / Pico 2 上逐组合实测（53 个被接受、1571 个报 `Invalid pins`），
@@ -219,15 +226,17 @@ CircuitPython 10.3.1 / Pico 2 上逐组合实测（53 个被接受、1571 个报
 
 | 命令 | 参数 | 说明 |
 | --- | --- | --- |
-| `pwm.cfg` | `pin`, `freq`(默认 1000), `duty`(默认 0.5) | 启动或改参。`freq` 单位 Hz，只接受整数值，低于 1 直接报错；`duty` 取 0..1 |
-| `pwm.stop` | `pin` | 停掉并释放该脚 |
+| `pwm.cfg` | `pin`, `freq`(默认 1000), `duty`(默认 0.5), `backend`(默认 `"hw"`) | 启动或改参。`duty` 取 0..1；`backend` 是 `"hw"`（硬件 slice）或 `"pio"`（状态机）。`hw` 的 `freq` 单位 Hz、只接受整数值，低于 1 直接报错 `freq < 1 Hz: PWMOut takes whole hertz`；`pio` 的 `freq` 可以是小数，窗口由 `caps.pwm_pio` 那五个数算出来，越界报 `... below PIO floor ...` / `freq above PIO ceiling ...` |
+| `pwm.stop` | `pin` | 停掉并释放该脚，两种发生器一起拆（PIO 那路会把状态机还回预算） |
 
 改频率时固件会 `deinit` 后重建对象——rp2 上直接写 `.frequency` 会抛
 `Invalid variable_frequency`，这是绕开硬件库缺陷的做法。
+`backend` 与现状不同也一律重建：一个 pad 只能挂一种发生器，而正在跑的状态机还在照它那条
+4 深的 TX FIFO 出货，直接写新计数要等五个周期才见效。
 
-rp2 的分频器做不到你想要的每一个整数频率：它只能跑 125 MHz/(div×(top+1))，
+`hw` 这路的分频器做不到你想要的每一个整数频率：它只能跑 125 MHz/(div×(top+1))，
 实测下限 9 Hz（1..8 Hz 全部落到 9），高频也会量化（1000→990、2000→2035）。
-所以回包里 `pwm.<脚>.hfreq` 给的是**slice 真实运行的频率**，`freq` 仍是你请求的值，
+所以回包里 `pwm.<脚>.hfreq` 给的是**当前发生器真实跑出来的频率**，`freq` 仍是你请求的值，
 界面据此把频率框标成琥珀色并写一条日志。
 
 同一 slice 的两个脚（如 GP24/GP25 = slice 4，按 `(n // 2) mod 8` 算）不能各自设频率：第二个 `pwm.cfg`
@@ -376,7 +385,9 @@ MQTT 风格的开关，用来控制设备主动推什么。
 | `cfg_pd` | 位掩码 | 启用下拉的输入脚 |
 | `cfg_pn` | 位掩码 | 设为无拉制的输入脚 |
 | `cfg_pwm` | 位掩码 | 被 PWM 占用的脚 |
-| `pwm` | 对象 | `{"<脚号>": {"freq": f, "hfreq": h, "duty": d}}`，`hfreq` 是 slice 实际运行频率 |
+| `cfg_pio_pwm` | 位掩码 | 这些脚里由 PIO 状态机驱动的那些（`cfg_pwm` 的子集） |
+| `pio_sm_free` | 整数 | 还剩几个空闲状态机；预算是**整块芯片**的，不是按脚算的 |
+| `pwm` | 对象 | `{"<脚号>": {"freq": f, "hfreq": h, "duty": d, "be": "hw"|"pio"}}`，`be` 是当前发生器，`hfreq` 是它实际跑出来的频率（硬件 slice 只能落到整数赫兹，PIO 由 SM 时钟/周期数决定） |
 | `cfg_adc` | 位掩码 | 被 ADC 占用的**物理**脚（不含虚拟温度通道） |
 | `adc_temp` | 布尔 | 温度通道是否启用 |
 | `cfg_i2c` | 位掩码 | 被 I2C 占用的脚 |
@@ -390,6 +401,8 @@ MQTT 风格的开关，用来控制设备主动推什么。
 总线数组（`i2c` / `uart` / `spi`）参与漂移比对，格式是 `id:成员,成员,...` 排序拼接的签名；
 SPI 的签名里带 `cs` 顺序、`baud` 与 `mode`，所以片选少一路也会被判成漂移。
 `hbaud` 是分频器实际跑出来的时钟，请求值放在 `baud`，两者可以不同。
+PWM 的漂移比对是两半一起看：`cfg_pwm` 说哪些脚在跑，`cfg_pio_pwm` 说其中哪几路归 PIO。
+只有前一个数对得上、发生器却悄悄换成了硬件 slice，也算漂移，会重新下发 `pwm.cfg`（带 `backend`）。
 
 ---
 
@@ -445,3 +458,10 @@ CS 被算成"已占用"是有实际理由的：它是一根普通输出线，
 反正设备才是最终裁决者，配不上会明确报错。SPI 尤其如此：没有 `caps.spi.groups`
 时任何引脚组合都摆得进去，是 `spi.cfg` 那条 routable set 报错来收尾的；
 片数上限和时钟上限也退成默认的 4 路 CS / 2 条总线，界面不再过滤高频预设。
+
+`caps.pwm_pio` 缺失走的是另一条路：不是"宽松放行"，而是"整个功能收起来"。收不到这份能力表
+就等于板子没有 PIO 发生器，界面不显示 HW|PIO 切换条；
+配置里如果存着 PIO 通道，会被降级回硬件切片并夹进硬件窗口（1–30,000,000 Hz），
+免得把板子不支持的请求发下去。发出去的 `pwm.cfg` 仍带 `backend:"hw"`，
+老固件不认这个参数也只是忽略它。窗口本身由这张表算出，两端都是精确除法，
+所以换固件不用改上位机的数字。

@@ -4,6 +4,49 @@ PicoHarness 版本说明
 界面与固件要配套：旧固件收不到新命令，会回 "unknown cmd"。
 
 
+[20261013 0.1.18-pio]
+
+PWM 多了一台发生器：状态机自己数的 PIO。硬件 slice 的实测下限一直是 9 Hz
+（填 1..8 Hz 板子都跑 9），低于 1 Hz 更是直接拒；这一版把下限推到 0.0174553 Hz，
+用的是一段 8 指令的 PIO 程序——SM 每个 tick 走一格，高/低两段各一个 16 位计数器，
+一个周期固定再花 8 格，于是 SM 时钟窗口（实测 2288 Hz–150 MHz）换算成
+0.0174553–15,000,000 Hz 的输出频率。上板实测：0.1 Hz 一路稳跑（回报 0.099986 Hz，
+偏差 0.014 %），GP0..GP11 十二路 0.1 Hz 同时开全部正常，第 13 路被拒并回
+`RuntimeError: no free PIO state machine (12/12 in use)`；硬件那路做交叉核对，
+GP14 请求 5 Hz 仍回报 hfreq 9。
+
+窗口两端不是写死的数字。ready.caps 新增 `pwm_pio`：`pins`（RP2350 每个 GPIO 都在 PIO
+矩阵里，所以就是可寻址集合本身）、`max_sm`，加上 `tick_cycles`、`fixed_cycles`、
+`counters`、`clk_min`、`clk_max` 五个窗口参数，主机按 `clk_min/(2*counters+fixed)` 和
+`clk_max/(fixed+2)` 现算上下限。换芯片或改指令段，上位机不用跟着改。
+`lib/adafruit_pioasm.mpy` 不在时 `pwm_pio` 整个是 `null`——rp2pio 是内置的，外挂的只有
+这个板内拼 asm 的库——缺件不致命：code.py 照跑，界面收起 HW/PIO 选择，硬件 slice 不受影响。
+
+协议变化：`pwm.cfg` 新增 `backend`（`"hw"` 默认 / `"pio"`），`hw` 的 `freq` 仍只吃整数、
+`pio` 的可以是小数，越界分别报 `below PIO floor` / `above PIO ceiling`；state 新增
+`cfg_pio_pwm`（这些 PWM 脚里哪几路在跑 PIO）和 `pio_sm_free`（剩余状态机数，预算是整块芯片的），
+`pwm.<脚>` 新增 `be`。`pwm.stop` 两种发生器一起拆，PIO 那路把状态机还回预算。
+
+改频率和改 backend 都走 deinit + 重建，这不是风格问题：正在跑的状态机仍照它那条 4 深的
+TX FIFO 出货，实测新计数要五个周期后才见效（重启后仍要四个），所以重建并在跑之前 arm，
+第一个周期就是新参数。构造函数抛异常的那台 SM 会把引脚占到复位为止、又不退还预算，
+于是错误消息写明脚号（`GP%d PIO start refused`），免得下一次在同脚上的尝试看起来是
+另一桩新故障。
+
+上位机：频率框左边新增 HW | PIO 分段按钮，逐通道独立、默认硬件；被拒的错误只写在那一颗
+芯片下方（红字 + 日志一行），界面不会替你改回硬件——选择是用户的，`cfg_pio_pwm` 如实回报。
+频率夹取方向改为朝里：窗口端点是精确除法（PIO 下限 0.01745533…），按四舍五入落到 0.017455
+就会向固件要到低于下限的时钟，这一版实测修掉。持久化快照给 PWM 通道加了 `b` 字段
+（缺省/0 是硬件，1 是 PIO），旧快照不带 `b` 读作硬件，配置里没有 `caps.pwm_pio` 时存的 PIO
+通道会被降级回硬件并夹进硬件窗口。
+
+文档同步：01 §2.2 补 `adafruit_pioasm` 缺件行为、§4.4 新增 4.4.1（HW/PIO 对照表、两端点算式、
+12 路实测、第 13 路拒绝原文）；02 的 caps/state/`pwm.cfg` 三处补齐新字段并说明窗口来源；
+03 的常见错误加了预算耗尽、窗口越界、缺 pioasm 三条；04 记下 PIO 的实测约束。
+验证：`tools/pio_fw_check.py` 上板跑通（12 路共存 + 拒绝 + 掩码 + 预算归还），
+`tools/pio_pwm_probe.py`、`tools/pio_bg_probe.py`、`tools/pio_stage0a.py`、`tools/pio_pwm_read.py`
+是这一路的探针，`tools/make_mock.mjs` 把 mock 注入 dist/index.html 变成可离线点的 mock.html。
+
 [20261013 ui-bus-badges]
 
 固件版本不变（0.1.17-gp29），这一版只动上位机。

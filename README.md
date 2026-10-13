@@ -49,7 +49,9 @@ npm run build          # -> dist/index.html (self-contained single file)
 ```
 
 1. Flash a CircuitPython UF2 to get the CIRCUITPY volume.
-2. `circup install asyncio` — the firmware's event loop needs it; CircuitPython does not ship one.
+2. `circup install asyncio adafruit_pioasm` — the firmware's event loop needs the first; CircuitPython does not ship
+   it. The second is the PIO PWM generator's assembler and is optional: without it the hardware slices work as before
+   and the UI simply hides the HW / PIO choice.
 3. Copy `src/fw/boot.py` and `src/fw/code.py` to the root of the volume (remove any `main.py` there, it would win over
    `code.py`), then press RESET — `boot.py` only takes effect on a hard reset, and it is what opens the second CDC port.
 4. Open `dist/index.html` in Chrome or Edge, click **Connect**, and select every entry of the board in the port picker.
@@ -108,7 +110,7 @@ command, the build/deploy steps, and the full verification chain are in
 ### 7. Roadmap
 
 Done: Web Serial handshake loop, IO-assignment workbench (pin pool + lanes, drag to bind, automatic
-displacement, instant dispatch), GPIO / PWM / ADC lanes, batched ADC waveform stream plus scope,
+displacement, instant dispatch), GPIO / PWM / ADC lanes (PWM selectable per channel between a hardware slice and a PIO state machine, measured down to 0.1 Hz), batched ADC waveform stream plus scope,
 on-die temperature virtual channel, MQTT-style event subscriptions, binary-frame kind registry,
 I2C bus lane with raw transactions and legal-pair probing, UART bus lane with live console terminal
 tabs, SPI bus lane on the measured rp2 pin groups (half buses, up to 4 CS per bus, raw byte bench),
@@ -147,7 +149,8 @@ npm run build          # -> dist/index.html（自包含单文件）
 ```
 
 1. 给板子烧 CircuitPython UF2，得到 CIRCUITPY 卷。
-2. `circup install asyncio`：固件的事件循环依赖它，CircuitPython 不内置。
+2. `circup install asyncio adafruit_pioasm`：前者是固件事件循环的依赖，CircuitPython 不内置；后者只在 PIO 那台
+   PWM 发生器上用得到，缺了不影响硬件 slice，界面只是不再出现 HW / PIO 选择。
 3. 把 `src/fw/boot.py` 和 `src/fw/code.py` 复制到卷根目录（根目录若有 `main.py` 要删掉，它会顶掉 `code.py`），
    然后按一次 RESET：`boot.py` 只有硬复位才生效，第二个 CDC 口是它打开的。
 4. 用 Chrome / Edge 打开 `dist/index.html`，点"连接设备"，在选择框里把这块板的所有条目全选。
@@ -202,7 +205,7 @@ uv venv -p 3.12 --seed -n .venv
 ### 7. 路线图
 
 已完成：Web Serial 握手闭环、IO 分配工作台（引脚池 + 泳道、拖拽绑定、自动顶位、即时下发）、
-GPIO / PWM / ADC 泳道、ADC 批量波形流 + 示波器、片内温度虚拟通道、MQTT 式事件订阅、
+GPIO / PWM / ADC 泳道（PWM 逐通道可选硬件 slice 或 PIO 状态机，实测低到 0.1 Hz）、ADC 批量波形流 + 示波器、片内温度虚拟通道、MQTT 式事件订阅、
 二进制帧 kind 注册表、I2C 总线泳道（原始事务 + 合法序对探测）、UART 总线泳道 + 控制台实时终端标签、
 SPI 总线泳道（按实测引脚组，允许半总线、每条最多 4 路 CS、原始字节事务台）、
 调试控制台（监听 / REPL / 复制导出）、配置持久化（浏览器 localStorage）+ 导出/导入/清空菜单、

@@ -103,13 +103,17 @@ GP7 ── 330Ω ── LED anode, LED cathode ── GND
   so they can only run one frequency. To run two different frequencies, compute each pin's slice —
   `(n // 2) mod 8` for n ≤ 31, `8 + ((n - 32) mod 8) // 2` for n ≥ 32 — and pick pins whose results differ
   (GP7 is slice 3, GP11 is slice 5); **"not adjacent" is not the same as "not the same slice"**, because
-  GP16/GP17 wrap back to slice 0. Or accept the shared frequency and vary only duty. Asking the second pin for
+  GP16/GP17 wrap back to slice 0. Or accept the shared frequency and vary only duty — **or put one of the two
+  channels on PIO**, which counts its own ticks and ignores the slice grouping. Asking the second pin for
   another frequency does not overwrite the first: `pwm.cfg` fails with `Conflicting settings for shared resource` and
   that pin goes back to the pool.
-- **There is a low-frequency floor.** Fixed-frequency mode on the rp2 accepts integer Hz only, and the measured floor
+- **The hardware slice has a low-frequency floor.** Fixed-frequency mode on the rp2 accepts integer Hz only, and the measured floor
   is 9 Hz: 1..8 Hz all run at 9 Hz, and higher requests quantize (1 kHz comes out as 990 Hz). The firmware reports the
   real frequency, so the field turns amber and its tooltip says what the hardware runs; a value below 1 Hz is rejected
-  by the device outright. That is honest reporting, not a bug.
+  by the `hw` backend outright. That is honest reporting, not a bug — and it is exactly why the channel has a second
+  button. **Click PIO left of the frequency field** and the state machine takes over: 0.1 Hz holds steady
+  (reported as 0.099986 Hz) and the window reaches down to 0.0174553 Hz. The price is one state machine per channel,
+  and the chip has 12.
 
 **Want to capture the waveform**: bring the PWM pin over to the neighbouring GP26 with a jumper wire, and the ADC plus the scope will show your own square wave.
 The ADC stream is at best one batch every 10 ms, so a high-frequency square wave is severely distorted. Use it for slow duty-cycle changes only.
@@ -309,7 +313,10 @@ UART tabs also yield to the main terminal when you enter the REPL and unsubscrib
 | `RuntimeError: No pull up found on SDA or SCL` | The pair is legal; the lines are simply not pulled high | Check the wiring, the pull-ups, and VCC/GND. Do not change code. |
 | `ValueError: ... GP1 in use` (or GP0) | **Only on the old single-port build**, where the CircuitPython console held that UART0 pair. Since 0.1.14 the protocol lives on its own data port and `uart.cfg tx=0 rx=1` builds the bus (retested on hardware) | If you are still on a single-port build, add `boot.py` and hard-reset; otherwise use another pairing such as GP6/GP7 (UART1) |
 | `RuntimeError: pin GP7 busy` | The pin already belongs to another function | Unbind the chip from the old lane first, then bind the new one. |
-| `ValueError: freq < 1 Hz: PWMOut takes whole hertz` | Fixed-frequency mode on the rp2 accepts integer Hz only | Enter a whole frequency of 1 or more. Before reaching for the mHz unit, confirm the device accepts it. |
+| `ValueError: freq < 1 Hz: PWMOut takes whole hertz` | The `hw` backend accepts integer Hz only | Enter a whole frequency of 1 or more, or switch that channel to PIO. |
+| `ValueError: clock ... below PIO floor ...` / `freq above PIO ceiling ...` | The SM clock the PIO channel wants is outside the measured window (2288 Hz – 150 MHz), i.e. the frequency left 0.0174553–15,000,000 Hz | Move the frequency back inside. The UI clamps inward, so only a hand-typed value can cross the edge. |
+| `RuntimeError: no free PIO state machine (12/12 in use)` | The RP2350 has 12 state machines, one per PIO channel, and all are taken | Unbind one PIO channel (drag it back to the pool, or press ×) before opening another; `pio_sm_free` says how many are left. |
+| `RuntimeError: PIO PWM unavailable: copy lib/adafruit_pioasm.mpy` | `rp2pio` is built in, but the PIO-text assembler `adafruit_pioasm` is missing from `lib/` | Copy `lib/adafruit_pioasm.mpy` and hard-reset. Skipping it is fine — the hardware slices keep working and the HW/PIO switch simply never appears. |
 | `Invalid variable_frequency` | Two pins in one slice want different frequencies, or you changed `.frequency` in fixed-frequency mode | Accept the shared frequency, or move the two pins into different slices. |
 | The board's serial output is only `ImportError: no module named 'asyncio'` | asyncio is not installed on the device | Run `circup install asyncio`. Afterwards `G:\lib` should contain `asyncio/` and `adafruit_ticks.mpy`. |
 | `RuntimeError: this bus has no TX pin / no RX pin` | Half bus, an expected limitation | If you need both directions, add the other wire. |

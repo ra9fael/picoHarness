@@ -103,11 +103,14 @@ GP7 ── 330Ω ── LED 正极，LED 负极 ── GND
   两个脚共用一个频率。想两个脚跑不同频率，就按 `(n // 2) mod 8`（n ≥ 32 用
   `8 + ((n - 32) mod 8) // 2`）算出各自属于哪个 slice，选算出来不同的（例如 GP7 是 slice 3、
   GP11 是 slice 5）——**"不相邻"不等于"不同 slice"**，GP16/GP17 就又绕回 slice 0。
-  或者干脆接受同频只改占空比。给第二个脚要求别的频率时，`pwm.cfg` 不会覆盖
+  或者干脆接受同频只改占空比，**或把其中一路切到 PIO**（它数自己的 tick，不看 slice 分组）。
+  给第二个脚要求别的频率时，`pwm.cfg` 不会覆盖
   第一个脚，而是直接失败回 `Conflicting settings for shared resource`，那个脚回到引脚池。
-- **低频有下限**。rp2 固定频率模式只吃整数 Hz，实测最低 9 Hz：填 1～8 Hz 板子都跑 9 Hz，
+- **硬件 slice 低频有下限**。rp2 固定频率模式只吃整数 Hz，实测最低 9 Hz：填 1～8 Hz 板子都跑 9 Hz，
   高频也会量化（1 kHz 实际 990 Hz）。固件把真实频率回报给界面，频率框会变琥珀色并写明
-  "硬件实际 Y Hz"；填 0.5 Hz 这类低于 1 的值，设备侧直接报错。
+  "硬件实际 Y Hz"；填 0.5 Hz 这类低于 1 的值，`hw` 这路直接报错。
+  **要真低频就点频率框左边的 PIO**：那一路由状态机自己数 tick，实测 0.1 Hz 稳稳输出
+  （回报 0.099986 Hz），窗口一直低到 0.0174553 Hz。代价是每路吃掉一个状态机，全芯片只有 12 个。
 
 **想抓波形**：把 PWM 脚用杜邦线引到隔壁的 GP26，ADC + 示波器就能看到自己的方波。
 不过 ADC 流最快也就 10 ms 一批，看高频方波会严重走样，只适合看慢速占空比变化。
@@ -306,7 +309,10 @@ FF EF 40 18  ·  读回 4 字节  ·  实际 1000000 Hz
 | `RuntimeError: No pull up found on SDA or SCL` | 引脚对是合法的，只是线没被拉高 | 查接线、上拉、VCC/GND，别改代码 |
 | `ValueError: ... GP1 in use`（或 GP0） | **只有旧单口固件这样**：那时这对脚被 CircuitPython 控制台占着。0.1.14 起协议跑在独立 data 口，实测 `uart.cfg tx=0 rx=1` 建得起来 | 还在单口形态上就先补 `boot.py` 并硬复位；否则换 GP6/GP7（UART1）这类配对 |
 | `RuntimeError: pin GP7 busy` | 这个脚已经属于别的功能 | 先把旧泳道上的芯片解绑，再绑新的 |
-| `ValueError: freq < 1 Hz: PWMOut takes whole hertz` | rp2 固定频率模式只收整数 Hz | 频率填 ≥1 的整数，低频需求用 mHz 档前先确认设备侧接受 |
+| `ValueError: freq < 1 Hz: PWMOut takes whole hertz` | `hw` 那路只收整数 Hz | 频率填 ≥1 的整数，或把这路切到 PIO |
+| `ValueError: clock ... below PIO floor ...` / `freq above PIO ceiling ...` | PIO 这路要的 SM 时钟越过了实测窗口（2288 Hz – 150 MHz），也就是频率出了 0.0174553–15,000,000 Hz 之外 | 把频率挪回窗口内；界面的夹取本来就朝内，手填才可能越界 |
+| `RuntimeError: no free PIO state machine (12/12 in use)` | RP2350 一共 12 个状态机，PIO 通道一人一个，已经用满 | 先解绑一路 PIO（拖回池中或点 ×），再开新的；`pio_sm_free` 会告诉你还剩几个 |
+| `RuntimeError: PIO PWM unavailable: copy lib/adafruit_pioasm.mpy` | `rp2pio` 是内置的，但拼装 PIO 指令的 `adafruit_pioasm` 没进 `lib/` | 补上 `lib/adafruit_pioasm.mpy` 并硬复位；不装也行，硬件 slice 照常可用，只是界面不再出现 HW/PIO 选择 |
 | `Invalid variable_frequency` | 同 slice 两脚要不同频率，或固定频率模式改 `.frequency` | 接受同频，或把两脚分到不同 slice |
 | 板子串口只有 `ImportError: no module named 'asyncio'` | 没装 asyncio 到设备 | `circup install asyncio`，装完 `G:\lib` 下应有 `asyncio/` 与 `adafruit_ticks.mpy` |
 | `RuntimeError: this bus has no TX pin / no RX pin` | 半总线，正常限制 | 需要收发就补上另一根线 |
