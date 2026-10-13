@@ -10,7 +10,9 @@
 # generators behind the same command: the rp2 hardware slice, and a PIO countdown whose
 # floor is the SM clock over the longest legal period (0.0175 Hz measured; see
 # caps["pwm_pio"]); the host picks one per channel and the device reports which one is
-# running.
+# running. A third kind of command talks to the volume instead of the pins: cfg.get /
+# cfg.save / cfg.clear keep the host's workbench snapshot in /config.json, verbatim and
+# uninterpreted — the board is a vault, not a second owner of the config schema.
 # Main loop is an asyncio task group: command_reader + gpio_monitor, which
 # pushes {"evt":"gpio_in","in":mask} on input level *edges* but only while the
 # host is subscribed to topic "gpio.in" (see SUBS / cmd_sub — MQTT-style, with
@@ -46,6 +48,7 @@ import sys
 import select
 import time
 import json
+import os
 import struct
 import array
 import asyncio
@@ -77,7 +80,7 @@ if DATA is not None:
     DATA.timeout = 0  # read() returns immediately instead of waiting for bytes
 
 APP = "PicoHarness"
-VERSION = "0.1.18-pio"
+VERSION = "0.1.19-cfg"
 # Which GPIOs this harness may touch is decided by two things stacked on top of
 # each other: the CHIP PACKAGE and, narrower still, the BOARD DEFINITION.
 #  * pico-sdk src/rp2350/hardware_regs/include/hardware/platform_defs.h sets
@@ -1357,6 +1360,11 @@ def probe_caps():
         # sweep (see pio_caps()). None when lib/adafruit_pioasm.mpy is not on the volume,
         # which is how the host learns not to offer the mode at all.
         "pwm_pio": pio_caps(),
+        # The device-side config vault. Path is what the UI shows the user (the
+        # file lives on the CIRCUITPY volume, where the user can also delete it by
+        # hand — Web Serial has no way to reach the filesystem). A firmware
+        # predating this command pair reports nothing, so the UI hides the vault.
+        "cfg": {"path": CFG_PATH, "max_bytes": CFG_MAX},
         # Which CDC topology the board came up with: true = boot.py enabled the
         # second port and the protocol is on it, false = single-port console
         # fallback. The host needs this to know whether a console port exists.
@@ -1549,6 +1557,96 @@ def cmd_adc_stop(args):
     return {"ok": True, "data": read_state()}
 
 
+# —— device-side configuration vault (cfg.get / cfg.save / cfg.clear) ——
+# The lane assignment survives a reboot because the board keeps the file, not
+# because the browser remembers. The firmware is a VAULT: it stores and returns
+# the UI's snapshot JSON without interpreting it, so the schema has exactly one
+# owner (src/ui/model/store.ts) and an exported file, a browser copy and this
+# file are the same bytes. The one thing this rules out is a second firmware-side
+# reading of the config — which is also why the board does NOT program its own
+# pins from it at boot; a host has to be the one that applies it.
+# Written on explicit user action only, never as a side effect of an edit: the
+# volume is also a USB mass-storage device, and a file that changed under someone
+# browsing it is a worse surprise than a stale one.
+CFG_PATH = "/config.json"
+CFG_TMP = "/config.json.tmp"
+# A full snapshot of a 30-GPIO board is a few KB. The ceiling only exists to keep
+# a corrupted or hand-edited file from costing heap we do not have.
+CFG_MAX = 65536
+
+
+def cfg_sync():
+    # Let the mass-storage view catch up with what code.py wrote. os.sync() is
+    # missing on older builds and can refuse on a read-only mount, neither of
+    # which changes what is on the flash.
+    try:
+        os.sync()
+    except (AttributeError, OSError):
+        pass
+
+
+def cfg_check(text):
+    # Shallow on purpose. What has to be true is that this came out of a UI at all
+    # — anything else is a truncated write or a hand edit, and refusing it beats
+    # storing something the host will not recognise next time.
+    try:
+        obj = json.loads(text)
+    except ValueError:
+        raise ValueError("config is not JSON")
+    if not isinstance(obj, dict) or not isinstance(obj.get("pins"), list):
+        raise ValueError("not a PicoHarness snapshot")
+    return obj
+
+
+def cmd_cfg_get(args):
+    try:
+        st = os.stat(CFG_PATH)
+    except OSError:
+        return {"ok": True, "data": {"text": None, "path": CFG_PATH}}
+    if st.st_size > CFG_MAX:
+        raise RuntimeError("%s is %d bytes, over the %d limit" % (CFG_PATH, st.st_size, CFG_MAX))
+    with open(CFG_PATH, "rb") as f:
+        text = f.read().decode()
+    return {"ok": True, "data": {"text": text, "path": CFG_PATH, "bytes": st.st_size}}
+
+
+def cmd_cfg_save(args):
+    text = args.get("text")
+    if not isinstance(text, str):
+        raise ValueError("need args.text")
+    buf = text.encode()  # the size we check is the size on the flash, not the char count
+    if len(buf) > CFG_MAX:
+        raise ValueError("config too large: %d bytes" % len(buf))
+    cfg_check(text)
+    with open(CFG_TMP, "wb") as f:
+        f.write(buf)
+    # The temp file becomes the config by replace, not by rename-onto: a rename onto
+    # an existing name is refused on this port's FAT, and the target only ever sees a
+    # complete file either way — an interrupted save costs the old config nothing,
+    # and a leftover config.json.tmp is overwritten by the next save.
+    try:
+        os.remove(CFG_PATH)
+    except OSError:
+        pass
+    os.rename(CFG_TMP, CFG_PATH)
+    st = os.stat(CFG_PATH)
+    if st.st_size != len(buf):
+        raise RuntimeError("wrote %d bytes, volume holds %d" % (len(buf), st.st_size))
+    cfg_sync()
+    return {"ok": True, "data": {"bytes": len(buf), "path": CFG_PATH}}
+
+
+def cmd_cfg_clear(args):
+    removed = False
+    try:
+        os.remove(CFG_PATH)
+        removed = True
+    except OSError:
+        pass  # already absent is the same end state as deleted
+    cfg_sync()
+    return {"ok": True, "data": {"removed": removed, "path": CFG_PATH}}
+
+
 COMMANDS = {
     "ping": cmd_ping,
     "hello": cmd_hello,
@@ -1560,6 +1658,9 @@ COMMANDS = {
     "pwm.stop": cmd_pwm_stop,
     "adc.cfg": cmd_adc_cfg,
     "adc.stop": cmd_adc_stop,
+    "cfg.get": cmd_cfg_get,
+    "cfg.save": cmd_cfg_save,
+    "cfg.clear": cmd_cfg_clear,
     "adc.stream": adc_stream,
     "i2c.cfg": i2c_cfg,
     "i2c.release": i2c_release_cmd,
