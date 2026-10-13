@@ -91,6 +91,10 @@
       clk_min: 2288,
       clk_max: 150000000,
     },
+    // The device-side config vault (firmware cfg.get/cfg.save/cfg.clear). The mock
+    // keeps it in a variable: same refusal of non-snapshot text, same reply fields,
+    // and it survives a program restart the way the real file survives a reboot.
+    cfg: { path: "/config.json", max_bytes: 65536 },
   };
 
   // The group a requested data-pin set belongs to, or null when it spans two (the
@@ -121,6 +125,17 @@
     return mask + 2 ** n;
   }
 
+  // A mask is up to 48 bits wide, past what JavaScript's bitwise operators keep, so
+  // every read and write here is plain arithmetic -- the same rule the UI's setBit()
+  // and the firmware's shifts follow. `| 0` would truncate a GP32.. GP47 mask.
+  function bitOn(mask, n) {
+    return Math.floor(mask / 2 ** n) % 2 === 1;
+  }
+
+  function putBit(mask, n, on) {
+    return bitOn(mask, n) === on ? mask : on ? setBit(mask, n) : mask - 2 ** n;
+  }
+
   function pioMask(p) {
     var mask = 0;
     Object.keys(p.pw).forEach(function (k) {
@@ -144,6 +159,61 @@
       pio_sm_free: CAPS.pwm_pio.max_sm - p.pioSm,
       pwm: p.pw,
     };
+  }
+
+  // read_state() in full. The host diffs this every second, so any lane the mock
+  // leaves out is a lane it will re-drive forever with a command it does not
+  // answer. GPIO carries real state now (owner[] plus the output levels); ADC/I2C
+  // and UART are reported empty because this mock has never implemented them, and
+  // SPI is derived from p.spi exactly as the firmware derives it from spi_bus --
+  // CS lines included, since a GPIO write to a line acting as CS would select a
+  // device.
+  function gpioState(p) {
+    var d = pwmState(p);
+    d.in = 0; // no way for a smoke test to drive a pin
+    d.out = p.gpio.vals;
+    d.cfg_in = p.gpio.in;
+    d.cfg_out = p.gpio.out;
+    d.cfg_pd = p.gpio.pd;
+    d.cfg_pn = p.gpio.pn;
+    d.cfg_adc = 0;
+    d.adc_temp = 0;
+    d.cfg_i2c = 0;
+    d.i2c = [];
+    d.cfg_uart = 0;
+    d.uart = [];
+    var ids = Object.keys(p.spi).sort(function (a, b) {
+      return Number(a) - Number(b);
+    });
+    var mask = 0;
+    var list = [];
+    ids.forEach(function (k) {
+      var b = p.spi[k];
+      [b.sck, b.mosi, b.miso].concat(b.cs).forEach(function (n) {
+        if (n >= 0) mask = setBit(mask, n);
+      });
+      list.push(b);
+    });
+    d.cfg_spi = mask;
+    d.spi = list;
+    return d;
+  }
+
+  // Pins a driver other than GPIO already holds, so gpio.cfg can skip them instead of
+  // stealing them -- the firmware's owner[] rule, which is what makes the workbench's
+  // "stop the PWM first" ordering matter.
+  function takenMask(p) {
+    var mask = 0;
+    Object.keys(p.pw).forEach(function (k) {
+      mask = setBit(mask, Number(k));
+    });
+    Object.keys(p.spi).forEach(function (k) {
+      var b = p.spi[k];
+      [b.sck, b.mosi, b.miso].concat(b.cs).forEach(function (n) {
+        if (n >= 0) mask = setBit(mask, n);
+      });
+    });
+    return mask;
   }
 
   function pioSolve(freq, duty) {
@@ -174,6 +244,8 @@
       pw: {}, // slot -> {freq, hfreq, duty, be}, mirroring firmware read_state().pwm
       pioSm: 0, // state machines in use, the same budget the firmware counts
       spi: {}, // bus id -> {sck, mosi, miso, cs, baud, hbaud, mode}, ditto read_state().spi
+      cfgText: null, // the stored config.json contents, ditto the cfg.* vault on the board
+      gpio: { in: 0, out: 0, pd: 0, pn: 0, vals: 0 }, // owner[] for "gpio": masks + output values
       getInfo: function () {
         return { usbVendorId: 0x2e8a, usbProductId: 0x000b };
       },
@@ -229,24 +301,77 @@
         if (!m || !m.cmd) return;
         if (m.cmd === "ping") return p.send({ id: m.id, ok: true, data: { pong: m.args.t } });
         if (m.cmd === "hello")
-          return p.send({ id: m.id, ok: true, data: { version: "0.1.18-mock", caps: CAPS } });
+          return p.send({ id: m.id, ok: true, data: { version: "0.1.19-mock", caps: CAPS } });
         if (m.cmd === "echo")
           return p.send({ id: m.id, ok: true, data: { msg: m.args.msg } });
-        if (m.cmd === "gpio.state") {
-          var spiMask = 0;
-          var spiList = [];
-          Object.keys(p.spi).forEach(function (k) {
-            var b = p.spi[k];
-            [b.sck, b.mosi, b.miso].concat(b.cs).forEach(function (n) {
-              if (n >= 0) spiMask |= 1 << n;
-            });
-            spiList.push(b);
+        // The config vault, mirroring the firmware's cfg.* handlers: the text is
+        // stored as given, only checked for being a snapshot, and never read.
+        if (m.cmd === "cfg.get")
+          return p.send({
+            id: m.id,
+            ok: true,
+            data: { text: p.cfgText, path: CAPS.cfg.path, bytes: p.cfgText ? p.cfgText.length : 0 },
           });
-          var data = pwmState(p);
-          data.cfg_in = 0; data.cfg_out = 0; data.out = 0; data.dev_in = 0;
-          data.cfg_adc = 0; data.cfg_i2c = 0; data.cfg_uart = 0;
-          data.cfg_spi = spiMask; data.spi = spiList;
-          return p.send({ id: m.id, ok: true, data: data });
+        if (m.cmd === "cfg.save") {
+          var txt = m.args && m.args.text;
+          if (typeof txt !== "string")
+            return p.send({ id: m.id, ok: false, error: "need args.text" });
+          if (txt.length > CAPS.cfg.max_bytes)
+            return p.send({ id: m.id, ok: false, error: "config too large: " + txt.length + " bytes" });
+          var snap = null;
+          try {
+            snap = JSON.parse(txt);
+          } catch (e) {
+            return p.send({ id: m.id, ok: false, error: "config is not JSON" });
+          }
+          if (!snap || !Array.isArray(snap.pins))
+            return p.send({ id: m.id, ok: false, error: "not a PicoHarness snapshot" });
+          p.cfgText = txt;
+          return p.send({ id: m.id, ok: true, data: { bytes: txt.length, path: CAPS.cfg.path } });
+        }
+        if (m.cmd === "cfg.clear") {
+          var had = p.cfgText !== null;
+          p.cfgText = null;
+          return p.send({ id: m.id, ok: true, data: { removed: had, path: CAPS.cfg.path } });
+        }
+        if (m.cmd === "gpio.state") {
+          return p.send({ id: m.id, ok: true, data: gpioState(p) });
+        }
+        // gpio.cfg replaces the whole input/output/pull mask set at once, and a pin
+        // another driver owns is skipped rather than stolen — the firmware's owner[]
+        // rule, which is what makes the workbench's "stop the PWM first" ordering
+        // matter. Without this handler every drift poll answered "unknown cmd" and
+        // the workbench logged a failure per pin per second.
+        if (m.cmd === "gpio.cfg") {
+          var c = m.args || {};
+          var inM = Number(c.in) || 0;
+          var outM = Number(c.out) || 0;
+          var pdM = Number(c.pd) || 0;
+          var pnM = Number(c.pn) || 0;
+          var next = { in: 0, out: 0, pd: 0, pn: 0, vals: p.gpio.vals };
+          var taken = takenMask(p);
+          for (var g = 0; g < GPS.length; g++) {
+            var n = GPS[g];
+            if (bitOn(taken, n)) continue; // owned elsewhere: not ours to reconfigure
+            var want = bitOn(outM, n) ? "out" : bitOn(inM, n) ? "in" : null;
+            if (want === "out") next.out = setBit(next.out, n);
+            else if (want === "in") {
+              next.in = setBit(next.in, n);
+              if (bitOn(pdM, n)) next.pd = setBit(next.pd, n);
+              else if (bitOn(pnM, n)) next.pn = setBit(next.pn, n);
+            }
+            if (want !== "out") next.vals = putBit(next.vals, n, false);
+          }
+          p.gpio = next;
+          return p.send({ id: m.id, ok: true, data: gpioState(p) });
+        }
+        if (m.cmd === "gpio.out") {
+          var mask = Number(m.args.mask) || 0;
+          var vals = Number(m.args.vals) || 0;
+          for (var g2 = 0; g2 < GPS.length; g2++)
+            if (bitOn(mask, GPS[g2]))
+              p.gpio.vals = putBit(p.gpio.vals, GPS[g2], bitOn(vals, GPS[g2]));
+          return p.send({ id: m.id, ok: true, data: gpioState(p) });
         }
         // rp2 SPI: pins must come from one group, a bare SCK is refused, and the
         // clock is 150 MHz divided by an even integer (so requests above 75 MHz
