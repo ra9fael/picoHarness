@@ -310,7 +310,10 @@
           return p.send({
             id: m.id,
             ok: true,
-            data: { text: p.cfgText, path: CAPS.cfg.path, bytes: p.cfgText ? p.cfgText.length : 0 },
+            data:
+              p.cfgText === null
+                ? { text: null, path: CAPS.cfg.path }
+                : { text: p.cfgText, path: CAPS.cfg.path, bytes: p.cfgText.length },
           });
         if (m.cmd === "cfg.save") {
           var txt = m.args && m.args.text;
