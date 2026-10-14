@@ -402,8 +402,8 @@ USB CDC 上 print(flush=True) 每次抛 OSError [Errno 22]（文本已出），�
 IO 分配工作台（引脚池 + 功能泳道，拖拽或点选绑定，占用自动顶位）。
 调试控制台集成 xterm.js，中英双语。
 
-更早的历史不在本篇范围：项目以 PicoJig 为蓝本，改为 CircuitPython +
-浏览器 Web Serial 直连 USB CDC 的单文件上位机。
+更早的历史不在本篇范围。本项目是 CircuitPython + 浏览器 Web Serial 直连 USB CDC
+的单文件上位机。
 
 
 [路线图未做项]

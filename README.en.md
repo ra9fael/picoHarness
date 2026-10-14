@@ -11,7 +11,7 @@
 [![中文](https://img.shields.io/badge/Lang-中文-green.svg)](./README.md) [![English](https://img.shields.io/badge/Lang-English-blue.svg)](./README.en.md)
 
 A Pico running CircuitPython, one HTML file, the browser talking straight to the USB serial port.
-This is the English copy; the Chinese version is [README.md](./README.md). Built on [PicoJig](../PicoJig-main).
+This is the English copy; the Chinese version is [README.md](./README.md).
 
 ---
 

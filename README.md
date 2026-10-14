@@ -11,7 +11,7 @@
 [![中文](https://img.shields.io/badge/Lang-中文-green.svg)](./README.md) [![English](https://img.shields.io/badge/Lang-English-blue.svg)](./README.en.md)
 
 一块跑 CircuitPython 的 Pico，一个 HTML 文件，浏览器直连 USB 串口。
-本仓库文档提供**中文**与**英文**两版：这份是中文版，英文版见 [README.en.md](./README.en.md)。基于 [PicoJig](../PicoJig-main)。
+本仓库文档提供**中文**与**英文**两版：这份是中文版，英文版见 [README.en.md](./README.en.md)。
 
 ---
 

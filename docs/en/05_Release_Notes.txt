@@ -472,9 +472,8 @@ IO assignment workbench (pin pool plus function lanes, bind by drag or click, an
 automatically bumps the previous one). The debug console integrated xterm.js, bilingual
 Chinese/English.
 
-History before this is out of scope for this document: the project used PicoJig as its blueprint
-and became a single-file host app built on CircuitPython plus browser Web Serial straight over
-USB CDC.
+History before this is out of scope for this document. The project is a single-file host app
+built on CircuitPython plus browser Web Serial straight over USB CDC.
 
 
 [Roadmap, not done]
