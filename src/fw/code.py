@@ -1598,16 +1598,23 @@ def cfg_check(text):
     return obj
 
 
+def cfg_size(path):
+    # CircuitPython's os.stat() hands back a bare tuple, not a stat_result object,
+    # so there is no .st_size to read: size is element 6 of
+    # (mode, ino, dev, nlink, uid, gid, size, atime, mtime, ctime).
+    return os.stat(path)[6]
+
+
 def cmd_cfg_get(args):
     try:
-        st = os.stat(CFG_PATH)
+        size = cfg_size(CFG_PATH)
     except OSError:
         return {"ok": True, "data": {"text": None, "path": CFG_PATH}}
-    if st.st_size > CFG_MAX:
-        raise RuntimeError("%s is %d bytes, over the %d limit" % (CFG_PATH, st.st_size, CFG_MAX))
+    if size > CFG_MAX:
+        raise RuntimeError("%s is %d bytes, over the %d limit" % (CFG_PATH, size, CFG_MAX))
     with open(CFG_PATH, "rb") as f:
         text = f.read().decode()
-    return {"ok": True, "data": {"text": text, "path": CFG_PATH, "bytes": st.st_size}}
+    return {"ok": True, "data": {"text": text, "path": CFG_PATH, "bytes": size}}
 
 
 def cmd_cfg_save(args):
@@ -1629,9 +1636,9 @@ def cmd_cfg_save(args):
     except OSError:
         pass
     os.rename(CFG_TMP, CFG_PATH)
-    st = os.stat(CFG_PATH)
-    if st.st_size != len(buf):
-        raise RuntimeError("wrote %d bytes, volume holds %d" % (len(buf), st.st_size))
+    size = cfg_size(CFG_PATH)
+    if size != len(buf):
+        raise RuntimeError("wrote %d bytes, volume holds %d" % (len(buf), size))
     cfg_sync()
     return {"ok": True, "data": {"bytes": len(buf), "path": CFG_PATH}}
 
