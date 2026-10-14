@@ -14,7 +14,24 @@ PicoHarness 版本说明
 不解析任何一个字段，**也不在上电时照它给引脚编程**。所以快照格式的主人仍然只有一个
 （`src/ui/model/store.ts`），导出的文件、浏览器那份、板子这第三份是同一串字节，
 固件升级不会因为读不懂而丢用户的东西。写入是临时文件改名 + 回读核对字节数 + `os.sync()`：
-中途掉电或拔线，卷上要么是完整旧配置，要么是完整新配置，不会剩半份。
+中途掉电或拔线，卷上要么是完整旧配置，要么是完整新配置，不会剩半份。回读核对是按
+`os.stat()` 的第 6 个元素取字节数的——CircuitPython 返回的是裸元组，没有 `.st_size` 这个属性。
+
+板子上写得进，靠的是 boot.py 新增的一行
+`storage.remount("/", readonly=False, disable_concurrent_write_protection=True)`。没有它，
+CircuitPython 眼里的卷是只读的，`cfg.save` 回 `OSError: [Errno 30] Read-only filesystem`，
+而其它一切照常——读命令、引脚、总线都不受影响，只有写会暴露这个问题。这一行是有代价的，
+两个版本都在 Pico 2 / 10.3.1 上实测过：只写 `readonly=False` 的话 Windows 侧就再也写不进 G:，
+从资源管理器拷固件这条路断掉，只能快速按两下 RESET 进安全模式救回来（安全模式既不做 boot.py
+也不做 code.py）；带上后面那个开关则两边都能写，代价是 Windows 显示的是卷的缓存，板子写了什么
+要等卷重新读一次才看得见。所以核对板子上那份配置请用界面的**从板子载入**，别在资源管理器里找
+`config.json`；要往 G: 拖文件之前先按一次 RESET，让两个视图对同一片空闲簇达成一致。
+boot.py 只在硬复位时执行，Ctrl-D 软复位不跑它。
+
+新增命令 `reset`，COMMANDS 表从 27 条变 28 条：先把 `{"reset":"pending"}` 答出去，等 0.25 秒
+让字节走完 CDC 缓冲，再 `microcontroller.reset()`，效果与按 RESET 键相同——boot.py 会重跑。
+部署动过 boot.py 之后不用再走到板子前面。界面这一版还没有触发它的按钮；mock 里同样备了这条
+命令，离线夹具不会回 "unknown cmd"。
 
 界面顶部**配置 ▾**菜单多一条分隔线和三行（保存到板子 / 从板子载入 / 删除板子配置），
 点"连接设备"时按这份优先级走：板子上有文件而工作台是空的 → 直接载入并只打一行日志；
@@ -28,6 +45,9 @@ PicoHarness 版本说明
 协议之外的一致性修复：mock 的 `gpio.state` 之前把所有 GPIO 掩码报成 0，于是任何已绑定的脚
 每秒都被判成漂移、重发一条 mock 不认的 `gpio.cfg`，冒烟测试里刷一屏
 `unknown cmd: gpio.cfg`。现在 mock 也按 owner[] 记账，GPIO 泳道能离线测了。
+
+存 / 载 / 重启后仍在 / 三种拒收（非 JSON、不是快照、超过上限）/ `reset` 之后主机重新拿到
+`ready`，这一整套由 `tools/vault_probe.py` 在 Pico 2 上实跑过，插板即测。
 
 已知限制：Web Serial 没有删除卷上文件的接口，"删除板子配置"只能删掉 code.py 认的那个路径，
 真要把 G:\config.json 从卷上抹掉还是得在资源管理器里删；重刷 UF2 或格式化整卷也会带走它。

@@ -131,7 +131,7 @@ The host-side rule:
 
 ## 3. Command Reference
 
-27 commands. Except for `ping` / `echo`, the `data` of a successful reply is normally the state object described in section 4.
+28 commands. Except for `ping` / `echo`, the `data` of a successful reply is normally the state object described in section 4.
 
 ### 3.1 General
 
@@ -140,6 +140,7 @@ The host-side rule:
 | `ping` | none (`t` echoed back) | `{"pong": <t>}` |
 | `hello` | none | `data` = the boot `ready` payload (app/version/cp/pins/gp/caps), so a host that joined after startup can learn the capabilities without rebooting the device |
 | `echo` | anything | The args echoed back verbatim; for self-tests |
+| `reset` | none | Replies `{"reset": "pending"}` first, resets the device about 0.25 s later. It exists because `boot.py` only runs on a hardware reset — after changing `boot.py` nobody has to walk to the board and press RESET |
 
 ### 3.2 GPIO
 
@@ -303,10 +304,21 @@ Error strings, with the command that raises them:
 | `cfg.save` | `config too large: N bytes` | over `caps.cfg.max_bytes` |
 | `cfg.save` | `wrote N bytes, volume holds M` | after the rename the file on the volume is not the size just written |
 | `cfg.get` | `/config.json is N bytes, over the 65536 limit` | the stored file is implausibly large — reported before it is read |
+| `cfg.save` | `OSError: [Errno 30] Read-only filesystem` | the board still runs a `boot.py` without `storage.remount(...)`, or it was copied but never hard-reset — the volume stays read-only for the code |
 
 The write goes through `config.json.tmp`, then removes the old file, then renames, re-checks the
 byte count on the volume and calls `os.sync()`: a power cut or an unplugged cable mid-save leaves
 either the complete old config or the complete new one, never half a file.
+
+These three commands stand on one line of `boot.py`: `storage.remount("/", readonly=False,
+disable_concurrent_write_protection=True)`. CircuitPython mounts the volume read-only **for the
+code** by default, so without it every `cfg.save` is an `Errno 30`. The price is that Windows reads
+G: from a cache and only refreshes it when the volume is re-read (a reset, a replug, an eject):
+measured on this board, two consecutive overwrites and 20 seconds later Explorer still showed the
+first copy, and it went on showing a file the board had already deleted. So ask the board whether a
+save landed — the UI's **Load from board** does that — rather than looking at the drive. And before
+dragging files onto G: to deploy, press RESET once so the two views agree about which clusters are
+free.
 
 ---
 

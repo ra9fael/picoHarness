@@ -41,8 +41,8 @@ rp2pio 本身已经编进 CircuitPython 10.3.1 的 RP2 构建里，不用装；�
 
 [固件部署]
 
-固件是两个文件：src/fw/boot.py（开双 CDC）和 src/fw/code.py（协议本体），都要拷到
-CIRCUITPY 卷根目录（下文记作 G:）：
+固件是两个文件：src/fw/boot.py（开双 CDC + 把卷对代码挂成可写）和 src/fw/code.py（协议本体），
+都要拷到 CIRCUITPY 卷根目录（下文记作 G:）：
 
     cp src/fw/boot.py /g/boot.py
     cp src/fw/code.py /g/code.py
@@ -52,9 +52,17 @@ CIRCUITPY 卷根目录（下文记作 G:）：
 写入后板子立即软复位，正在连接的 Web Serial 会掉线，需要在界面重新点 Connect。
 boot.py 只在硬复位时生效（按 RESET 或重新上电；Ctrl-D 软重启不会重跑它）。
 刚拷完 boot.py 请硬复位一次，否则设备仍只有一个 CDC 口，caps.usb.data 会是 false。
+不想走到板前就发 {"cmd":"reset"}：它先回 {"reset":"pending"}，约 0.25 秒后调
+microcontroller.reset()，效果等同于按 RESET——boot.py 会重跑。
 G: 根目录若存在 main.py，CircuitPython 就不会再运行 code.py（main.py 优先级更高）。
-boot.py 里只写 usb_cdc.enable(...)，不要占 GP0/GP1、更不要提前建总线对象——
-引脚裁决者在 code.py 里，boot.py 抢了串口控制台就没法用了。
+boot.py 里只有 usb_cdc.enable(...) 和 storage.remount(...) 两件事，不要占 GP0/GP1、
+更不要提前建总线对象——引脚裁决者在 code.py 里，boot.py 抢了串口控制台就没法用了。
+remount 那行的两个参数都是实测出来的，别"顺手收紧"：只写 readonly=False 的话板子能写了，
+但 Windows 会彻底失去对 G: 的写权限（拷文件报 Read-only file system），只能靠安全模式
+（连按两次 RESET，此时 boot.py 与 code.py 都不跑）把卷拿回来；带上
+disable_concurrent_write_protection=True 才是两边都能写。代价是 Windows 看 G: 是缓存，
+板子写了什么要等卷重新读一次（复位/拔插）才看得见——按界面里的"从板子载入"去确认，别开
+资源管理器看；要在 G: 上拖文件部署，先复位一次让两边视图对齐。
 G: 上没有 lib/ 时说明 circup 没装成功，code.py 会以 ImportError 起不来。
 
 界面"保存到板子"写的是 G:\config.json（临时文件 config.json.tmp 改名而来）。Web Serial 没有
@@ -122,6 +130,9 @@ ready.caps 里没有 uart/i2c_pairs/spi —— 这不是前端 bug，是 G:\code
 配置菜单里"保存到板子"那三行不见了，同样这条判据：ready.caps 里没有 cfg。
 只看到一个 COM 口、或 ready.caps.usb.data 为 false —— 是 G:\boot.py 没拷进去，
 或者拷完没做硬复位（Ctrl-D 不算）。
+"保存到板子"报 OSError: [Errno 30] Read-only filesystem —— 同一个根因的另一面：
+G:\boot.py 里缺 storage.remount(...)，或者拷了没硬复位。卷对代码仍是只读的，
+cfg.get/cfg.clear 会照常应答（读不需要写权限），所以只有写入暴露这个问题。
 ready.caps.spi 里的引脚组和别处实测不一致 —— 那是 SPI_GROUPS 这张静态表的问题，
 它是 pico-sdk hardware/gpio.h F1 列的完整转录（GP0..GP28 行另有上板实测逐行确认），
 开机不做 SPI 扫描，也别去改探测逻辑。注意出厂前它还按 caps.gp 投影一次：

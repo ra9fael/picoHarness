@@ -49,7 +49,8 @@ npm run build          # -> dist/index.html (self-contained single file)
    it. The second is the PIO PWM generator's assembler and is optional: without it the hardware slices work as before
    and the UI simply hides the HW / PIO choice.
 3. Copy `src/fw/boot.py` and `src/fw/code.py` to the root of the volume (remove any `main.py` there, it would win over
-   `code.py`), then press RESET — `boot.py` only takes effect on a hard reset, and it is what opens the second CDC port.
+   `code.py`), then press RESET — `boot.py` only takes effect on a hard reset, and it is what opens the second CDC port
+   and lets the board write `config.json` to its own volume.
 4. Open `dist/index.html` in Chrome or Edge, click **Connect**, and select every entry of the board in the port picker.
 
 Full setup, including the board-side checks: [User Manual §2](./docs/en/01_GUIApp_FW_Manual/README.md#2-prepare-the-board).

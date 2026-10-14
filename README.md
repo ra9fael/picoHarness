@@ -45,7 +45,8 @@ npm run build          # -> dist/index.html（自包含单文件）
 2. `circup install asyncio adafruit_pioasm`：前者是固件事件循环的依赖，CircuitPython 不内置；后者只在 PIO 那台
    PWM 发生器上用得到，缺了不影响硬件 slice，界面只是不再出现 HW / PIO 选择。
 3. 把 `src/fw/boot.py` 和 `src/fw/code.py` 复制到卷根目录（根目录若有 `main.py` 要删掉，它会顶掉 `code.py`），
-   然后按一次 RESET：`boot.py` 只有硬复位才生效，第二个 CDC 口是它打开的。
+   然后按一次 RESET：`boot.py` 只有硬复位才生效，第二个 CDC 口是它打开的，板子能写自己的
+   `config.json` 也是它打开的。
 4. 用 Chrome / Edge 打开 `dist/index.html`，点"连接设备"，在选择框里把这块板的所有条目全选。
 
 完整装机与板子侧检查见 [使用手册 §2](./docs/zh/01_GUIApp_FW_Manual/README.md#2-准备板子)。

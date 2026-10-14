@@ -16,7 +16,24 @@ top level, then stores it verbatim: it interprets no field and **does not progra
 format therefore keeps its single owner (`src/ui/model/store.ts`), and the exported file, the browser copy and this third copy
 on the board are the same bytes — a firmware update cannot lose a user's work by failing to understand it. Writing goes through
 a temporary file, a rename, a re-read of the byte count and `os.sync()`, so a power cut or an unplugged cable mid-save leaves
-either the complete old config or the complete new one, never half a file.
+either the complete old config or the complete new one, never half a file. That re-read counts bytes from element 6 of
+`os.stat()` — CircuitPython returns a bare tuple, there is no `.st_size` attribute to ask for.
+
+Writing to the board is possible because of a new line in boot.py:
+`storage.remount("/", readonly=False, disable_concurrent_write_protection=True)`. Without it CircuitPython sees the volume as
+read-only and `cfg.save` answers `OSError: [Errno 30] Read-only filesystem`, while everything else keeps working — reads, pins
+and buses are unaffected, only the write exposes it. Both halves of that line's trade were measured on the Pico 2 / 10.3.1:
+with only `readonly=False` Windows loses write access to G: completely, so deploying by copying files onto the drive is dead
+until someone gets the volume back by double-tapping RESET into safe mode (which runs neither boot.py nor code.py); with the
+second flag both sides can write, and the price is that Windows shows the volume from a cache, so what the board wrote appears
+only once the volume is read again. Verify a board save with **Load from board**, which asks the device, rather than looking for
+`config.json` in Explorer, and press RESET once before dragging files onto G: so the two views agree about which clusters are
+free. boot.py only runs on a hardware reset — Ctrl-D does not re-run it.
+
+New `reset` command, which takes the COMMANDS table from 27 to 28 entries: it sends `{"reset":"pending"}` first, waits 0.25 s
+for those bytes to leave the CDC buffer, then calls `microcontroller.reset()` — the same thing pressing RESET does, boot.py
+included. A deploy that touched boot.py no longer needs someone to walk to the board. No UI button issues it yet; the mock
+implements it as well so an offline harness never answers "unknown cmd".
 
 The **Config ▾** menu gains a divider and three rows (Save to board / Load from board / Delete board config), and clicking
 **Connect** resolves the starting configuration this way: a board file plus an empty workbench loads silently with one console
@@ -30,6 +47,9 @@ missing.
 Consistency fix outside the protocol: the mock used to report every GPIO mask as zero in `gpio.state`, so any bound pin looked
 like drift once a second and re-sent a `gpio.cfg` the mock did not implement — a smoke test filled the console with
 `unknown cmd: gpio.cfg`. The mock now keeps an owner table too, which makes the GPIO lane testable offline.
+
+Save, load, survival across a reboot, the three refusals (not JSON, not a snapshot, over the limit) and `reset` followed by a
+fresh `ready` on the host side are all exercised end to end by `tools/vault_probe.py`, which was run against the Pico 2.
 
 Known limitation: Web Serial cannot delete a file on the volume, so "Delete board config" only removes the path code.py knows
 about. Taking G:\config.json off the volume for good is still a trip to Explorer, though reflashing a UF2 or formatting the

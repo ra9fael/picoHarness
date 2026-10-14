@@ -506,6 +506,13 @@ When the board holds a `/config.json`, connecting resolves which configuration t
 The question appears only when you click **Connect**: a board that restarts while the link is already up (RESET, or
 saving `code.py` from Explorer) will not ask again something you have just answered.
 
+> To check what the board actually holds, ask the board with **Load from board** — do not look for `G:\config.json` in
+> Explorer. Windows shows the volume from a cache, and what the board wrote only appears there once the volume is read
+> again (press RESET, or unplug and replug): measured on this board, two overwrites in a row and a 20 second wait still
+> showed the first copy, and a file the board had deleted kept showing up too. The UI path always asks the device, so it
+> tells the truth. The other direction matters as much: press RESET once before dragging firmware onto G:, so the two
+> views do not disagree about which clusters are free.
+
 An imported file may not fit the board in front of you. **While connected, the handshake checks every binding against the
 capability table the device reported** and un-binds the pins this firmware cannot serve, naming them per function in the
 console, e.g. `Unbound PWM pins this firmware cannot drive: GP1 GP2` or `Unbound pins outside this firmware's UART pairs: GP10`.

@@ -204,7 +204,7 @@ CircuitPython 10.3.1 / Pico 2 上逐组合实测（53 个被接受、1571 个报
 
 ## 3. 命令总表
 
-27 条。除 `ping` / `echo` 外，成功的应答 `data` 通常就是第 4 节那份 state 对象。
+28 条。除 `ping` / `echo` 外，成功的应答 `data` 通常就是第 4 节那份 state 对象。
 
 ### 3.1 通用
 
@@ -213,6 +213,7 @@ CircuitPython 10.3.1 / Pico 2 上逐组合实测（53 个被接受、1571 个报
 | `ping` | 无（原样回带 `t`） | `{"pong": <t>}` |
 | `hello` | 无 | `data` = 开机 `ready` 的那份载荷（app/version/cp/pins/gp/caps），供后接入的主机免重启取能力 |
 | `echo` | 任意 | 原样回带 args，用于自检 |
+| `reset` | 无 | 先回 `{"reset": "pending"}`，约 0.25 秒后复位设备。存在的理由：`boot.py` 只在硬复位时跑，改完 `boot.py` 不必再走到板前按 RESET |
 
 ### 3.2 GPIO
 
@@ -397,10 +398,18 @@ MQTT 风格的开关，用来控制设备主动推什么。
 | `cfg.save` | `config too large: N bytes` | 超过 `caps.cfg.max_bytes` |
 | `cfg.save` | `wrote N bytes, volume holds M` | 改名之后卷上的字节数和刚写的对不上 |
 | `cfg.get` | `/config.json is N bytes, over the 65536 limit` | 卷上那份大得反常——先报，不去读它 |
+| `cfg.save` | `OSError: [Errno 30] Read-only filesystem` | 板上的 `boot.py` 还是不带 `storage.remount(...)` 的旧版，或拷进去了但没硬复位——卷对代码仍是只读的 |
 
 写入走 `config.json.tmp` → 删除旧文件 → 改名，读完字节数再核对一遍，然后 `os.sync()`：
 掉电或主机拔线时，卷上要么是完整的旧配置，要么是完整的新配置，不会留下半份。
 `cfg.get` 在读之前先看大小，超过 `max_bytes` 直接报错，不会为了一份坏文件把内存吃光。
+
+这三条有一个前提在 `boot.py` 里：`storage.remount("/", readonly=False,
+disable_concurrent_write_protection=True)`。CircuitPython 默认把卷对**代码**挂成只读，
+没有这一行 `cfg.save` 一律 `Errno 30`。代价是 Windows 看 G: 用的是缓存，只有卷被重新读一次
+（复位、拔插、弹出）才追上板子写下的东西——实测连续覆盖两次、再等 20 秒，Explorer 里还是最早
+那一份，甚至板子已经删掉了它还显示着。所以"存到板子了没有"要用界面上的**载入**去问板子，别用
+资源管理器去看文件；要在 G: 上拖文件部署，先按一次 RESET 让两份视图对齐。
 
 ---
 

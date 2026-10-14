@@ -45,8 +45,9 @@ it and it works straight from file://; no server needed. dist/ is git-ignored, d
 
 [Firmware deployment]
 
-The firmware is two files: src/fw/boot.py (enables the second CDC port) and src/fw/code.py (the
-protocol itself). Both are copied to the root of the CIRCUITPY volume (written as G: below):
+The firmware is two files: src/fw/boot.py (enables the second CDC port and makes the volume
+writable for the code) and src/fw/code.py (the protocol itself). Both are copied to the root of
+the CIRCUITPY volume (written as G: below):
 
     cp src/fw/boot.py /g/boot.py
     cp src/fw/code.py /g/code.py
@@ -58,9 +59,21 @@ click Connect again in the UI.
 boot.py only takes effect on a hard reset (press RESET or unplug/replug — a Ctrl-D soft reboot does
 not re-run it). After copying boot.py, hard-reset once, otherwise the board still exposes a single
 CDC port and caps.usb.data stays false.
+To avoid walking to the board, send {"cmd":"reset"}: it answers {"reset":"pending"} and about
+0.25 s later calls microcontroller.reset(), which is exactly what pressing RESET does — boot.py
+runs again.
 If a main.py exists in the G: root, CircuitPython never runs code.py (main.py takes priority).
-boot.py should contain nothing but usb_cdc.enable(...): do not claim GP0/GP1 or build bus objects
-there, because the pin arbiter lives in code.py and boot.py would grab the serial console.
+boot.py does two things and nothing else: usb_cdc.enable(...) and storage.remount(...). Do not
+claim GP0/GP1 or build bus objects there, because the pin arbiter lives in code.py and boot.py
+would grab the serial console.
+Both arguments on the remount line come from measurements — do not "tighten" them. With
+readonly=False alone the board can write, but Windows loses write access to G: completely
+(copying a file fails with Read-only file system), and the only way back is safe mode (press RESET
+twice quickly, which runs neither boot.py nor code.py). Adding
+disable_concurrent_write_protection=True is what lets both sides write. The price there is that
+Windows reads G: from a cache, so what the board wrote only becomes visible when the volume is
+re-read (a reset or a replug): confirm a save with the UI's "Load from board", not with Explorer,
+and press RESET once before dragging files onto G: so both views agree about free clusters.
 If G: has no lib/, circup did not install successfully and code.py will fail to start with an
 ImportError.
 
@@ -140,6 +153,10 @@ the source and copy the file once more.
 The three "board" rows missing from the Config menu is the same criterion: ready.caps has no cfg.
 Only one COM port appears, or ready.caps.usb.data is false — G:\boot.py was not copied, or the
 board was not hard-reset afterwards (Ctrl-D does not count).
+"Save to board" failing with OSError: [Errno 30] Read-only filesystem is the same root cause seen
+from the other side: G:\boot.py lacks storage.remount(...), or it was copied without a hard reset,
+so the volume is still read-only for the code. cfg.get and cfg.clear keep answering — reading
+needs no write permission, so only the write path exposes it.
 ready.caps.spi disagreeing with what a sweep would find — that is the static SPI_GROUPS table, a full
 transcription of the F1 column of pico-sdk hardware/gpio.h (whose GP0..GP28 rows were additionally
 confirmed on the board by tools/spi_probe.py, row for row). There is deliberately no SPI sweep at boot.
