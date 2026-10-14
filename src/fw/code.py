@@ -55,6 +55,7 @@ import asyncio
 
 import board
 import digitalio
+import storage
 import analogio
 import microcontroller
 import busio
@@ -1364,7 +1365,10 @@ def probe_caps():
         # file lives on the CIRCUITPY volume, where the user can also delete it by
         # hand — Web Serial has no way to reach the filesystem). A firmware
         # predating this command pair reports nothing, so the UI hides the vault.
-        "cfg": {"path": CFG_PATH, "max_bytes": CFG_MAX},
+        # writable says whether a save can succeed at all: without boot.py's
+        # remount() the volume is read-only for code.py, and every cfg.save is an
+        # Errno 30 the user can do nothing about from here.
+        "cfg": {"path": CFG_PATH, "max_bytes": CFG_MAX, "writable": cfg_writable()},
         # Which CDC topology the board came up with: true = boot.py enabled the
         # second port and the protocol is on it, false = single-port console
         # fallback. The host needs this to know whether a console port exists.
@@ -1586,6 +1590,21 @@ CFG_TMP = "/config.json.tmp"
 CFG_MAX = 65536
 
 
+def cfg_writable():
+    # Whether code.py can write the volume at all. boot.py's remount() decides
+    # that, and getmount() exposes the very flag a refused open() would trip over,
+    # so answering costs one attribute read and no file. Measured on 10.3.1: the
+    # attribute is named readonly (there is no .writable and no .mount_point), and
+    # remount() itself cannot be called from here — "Cannot remount path when
+    # visible via USB" — which is why a wrong answer can only be fixed by editing
+    # boot.py and doing a hard reset. None means an older build that does not
+    # report it, and the host then offers the buttons as before.
+    try:
+        return not storage.getmount("/").readonly
+    except Exception:
+        return None
+
+
 def cfg_sync():
     # Let the mass-storage view catch up with what code.py wrote. os.sync() is
     # missing on older builds and can refuse on a read-only mount, neither of
@@ -1655,6 +1674,11 @@ def cmd_cfg_save(args):
 
 
 def cmd_cfg_clear(args):
+    if cfg_writable() is False:
+        # A read-only mount makes os.remove() fail the same way an absent file does,
+        # so without this the reply would claim the file was simply not there while
+        # it is still on the volume.
+        raise RuntimeError("%s is on a read-only volume; delete it from the host" % CFG_PATH)
     removed = False
     try:
         os.remove(CFG_PATH)
