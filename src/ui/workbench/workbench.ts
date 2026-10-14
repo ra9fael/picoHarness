@@ -258,7 +258,7 @@ export class Workbench {
   // routine, let the normal dispatch push the result down to the pins. The firmware
   // stores these bytes without reading them (see its cfg.* handlers), which is what
   // keeps the schema owned here and nowhere else.
-  get deviceCfg(): { path: string; maxBytes: number } | null {
+  get deviceCfg() {
     return this.model.cfgVault;
   }
 
@@ -272,6 +272,9 @@ export class Workbench {
   async writeDevice(): Promise<{ path: string; bytes: number }> {
     const vault = this.model.cfgVault;
     if (!vault) throw new Error(t("cfg_dev_absent"));
+    // Refused here rather than at the button, so every path into the vault (menu,
+    // future shortcut) answers the same way: the board said it cannot write.
+    if (!vault.writable) throw new Error(t("cfg_dev_ro"));
     const text = configText(this.model);
     // Checked before the send, not after: the refusal would say the same thing, but
     // only after a few kilobytes have crawled over the wire.
@@ -283,6 +286,9 @@ export class Workbench {
   }
 
   async eraseDevice(): Promise<string> {
+    const vault = this.model.cfgVault;
+    // Deleting is a write to the volume, so a read-only mount refuses it too.
+    if (vault && !vault.writable) throw new Error(t("cfg_dev_ro"));
     const r = await this.link.sendCmd("cfg.clear");
     if (!r.ok) throw new Error(String(r.error));
     return this.model.cfgVault?.path ?? String(r.data?.path ?? "");

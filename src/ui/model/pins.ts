@@ -279,7 +279,10 @@ export class PinModel extends Emitter {
   // commands at all. Not a pin fact, so it sits beside the table like the other
   // whole-feature caps — and it gates the menu the same way a missing PIO table
   // gates the backend pick, instead of offering buttons that answer "unknown cmd".
-  private cfgTable: { path: string; maxBytes: number } | null = null;
+  // writable is false only when the board itself reported it: a volume mounted
+  // read-only for code.py turns every save into Errno 30, and an older firmware
+  // that never says is treated as writable rather than guessed at.
+  private cfgTable: { path: string; maxBytes: number; writable: boolean } | null = null;
 
   // The PIO PWM generator's measured limits, or null when this firmware has none: the
   // lane then hides the backend choice instead of offering a mode that would be refused.
@@ -414,7 +417,11 @@ export class PinModel extends Emitter {
     const cfg = caps?.cfg;
     this.cfgTable =
       cfg && typeof cfg.path === "string" && cfg.path
-        ? { path: cfg.path, maxBytes: Number(cfg.max_bytes) > 0 ? Number(cfg.max_bytes) : 0 }
+        ? {
+            path: cfg.path,
+            maxBytes: Number(cfg.max_bytes) > 0 ? Number(cfg.max_bytes) : 0,
+            writable: cfg.writable !== false,
+          }
         : null;
 
     // One place turns the message into truth for every view; see buildCaps.
@@ -437,7 +444,7 @@ export class PinModel extends Emitter {
   // The device-side config vault as the firmware reported it, or null when this
   // firmware has no cfg.* commands — the menu then hides the entries instead of
   // offering buttons that would answer "unknown cmd".
-  get cfgVault(): { path: string; maxBytes: number } | null {
+  get cfgVault(): { path: string; maxBytes: number; writable: boolean } | null {
     return this.cfgTable;
   }
 

@@ -11,6 +11,7 @@ const link = new SerialLink();
 const btnConnect = $("btn-connect") as HTMLButtonElement;
 const btnPing = $("btn-ping") as HTMLButtonElement;
 const btnEcho = $("btn-echo") as HTMLButtonElement;
+const btnReset = $("btn-reset") as HTMLButtonElement;
 const btnMode = $("btn-mode") as HTMLButtonElement;
 const btnLog = $("btn-logport") as HTMLButtonElement;
 const btnRaw = $("btn-rawstream") as HTMLButtonElement;
@@ -91,6 +92,8 @@ function syncUi() {
   // behaviour for this release, and the user should see that while it works.
   legacyWarn.hidden = !(linkState === "ready" && !link.dualCdc);
   btnPing.disabled = btnEcho.disabled = linkState !== "ready" || consolePanel.mode !== "monitor";
+  btnReset.disabled = linkState !== "ready" || consolePanel.mode !== "monitor";
+  btnReset.title = t("reset_hint");
   syncCfgMenu();
   wb.setActive(linkState === "ready" && consolePanel.mode === "monitor");
   scope.setActive(linkState === "ready" && consolePanel.mode === "monitor");
@@ -178,6 +181,20 @@ btnPing.addEventListener("click", async () => {
     consolePanel.note(tf("ping_rtt", Date.now() - t0, JSON.stringify(m.data ?? m.error)));
   } catch (e: any) {
     consolePanel.note(tf("ping_fail", e.message));
+  }
+});
+
+btnReset.addEventListener("click", async () => {
+  // Not a silent button: a reboot ends the link and wipes the board's volatile pin
+  // and bus configuration, which the workbench then re-applies after reconnecting.
+  // The reply arrives first (the firmware waits a quarter second before resetting),
+  // so the note below is the last thing this session says.
+  if (!confirm(t("reset_confirm"))) return;
+  try {
+    await link.sendCmd("reset");
+    consolePanel.note(t("reset_done"));
+  } catch (e: any) {
+    consolePanel.note(tf("reset_fail", e.message));
   }
 });
 
@@ -275,14 +292,24 @@ $("cfg-reset").addEventListener("click", () => {
 // backend pick on a firmware without a PIO generator. Nothing here can therefore
 // answer the user with "unknown cmd".
 const cfgDev = $("cfg-dev");
+const cfgDevNote = $("cfg-dev-note");
 const cfgDevSave = $("cfg-dev-save") as HTMLButtonElement;
 const cfgDevLoad = $("cfg-dev-load") as HTMLButtonElement;
 const cfgDevClear = $("cfg-dev-clear") as HTMLButtonElement;
 
 function syncCfgMenu(): void {
   cfgDev.hidden = !wb.deviceCfg;
-  const live = linkState === "ready" && !!wb.deviceCfg;
-  cfgDevSave.disabled = cfgDevLoad.disabled = cfgDevClear.disabled = !live;
+  const vault = wb.deviceCfg;
+  const live = linkState === "ready" && !!vault;
+  // A board whose volume is read-only for its own code cannot take a save or a
+  // delete, so those two rows go grey and the note under them says why. Reading
+  // stays offered — it needs no write permission. The note keeps its data-i18n
+  // key so a language switch picks up whichever line applies now.
+  const ro = !!vault && !vault.writable;
+  cfgDevSave.disabled = cfgDevClear.disabled = !live || ro;
+  cfgDevLoad.disabled = !live;
+  cfgDevNote.dataset.i18n = ro ? "cfg_dev_ro_note" : "cfg_dev_note";
+  cfgDevNote.textContent = t(cfgDevNote.dataset.i18n as MsgKey);
 }
 
 cfgDevSave.addEventListener("click", async () => {
