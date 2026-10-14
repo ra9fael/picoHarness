@@ -9,7 +9,11 @@ Pico 2, so the expectations below are not guesses:
   check runs after the reset step, and a file that lingers there after cfg.clear
   is expected, not a failure;
 * "survives a reboot" is the actual point of the feature, so reset is part of the
-  probe, which also exercises the reset command.
+  probe, which also exercises the reset command;
+* after any reset the port you can open is not necessarily the port you can use -
+  Windows hands out a handle to the dead USB instance, whose first write fails - so
+  every step that follows a reset retries until the board answers (the same rule
+  tools/mount_ab.py measures).
 
     python tools/vault_probe.py COM7
 """
@@ -44,10 +48,13 @@ def ask(obj, wait=1.3):
     # Chunked, because the device drains the CDC FIFO a few hundred bytes at a time:
     # a single 65 KB write would time out in the host driver long before the board
     # finished reading it, which says nothing about the firmware's own size guard.
-    while buf:
-        s.write(buf[:256])
-        buf = buf[256:]
-    s.flush()
+    try:
+        while buf:
+            s.write(buf[:256])
+            buf = buf[256:]
+        s.flush()
+    except Exception:
+        return None  # the port is a stale instance, not a live one
     time.sleep(wait)
     try:
         raw = s.read(s.in_waiting).decode("utf-8", "replace")
@@ -66,6 +73,32 @@ def ask(obj, wait=1.3):
     return None
 
 
+def reply(cmd, obj_id, wait=1.3, max_wait=90):
+    # Reaching the board after a reset is not the same as opening its port: Windows
+    # keeps the previous instance of the interface around and hands out handles that
+    # fail on the first write, so a reply - not a successful open - is the only proof.
+    # Each round closes and reopens, because a handle bound to the dead instance never
+    # heals. Same rule, same loop, as tools/mount_ab.py's hello().
+    global s
+    deadline = time.time() + max_wait
+    while time.time() < deadline:
+        try:
+            if s is not None:
+                s.close()
+        except Exception:
+            pass
+        s = None
+        try:
+            reopen(wait=0.5)
+            m = ask({"id": obj_id, "cmd": cmd}, wait)
+        except Exception:
+            m = None
+        if m:
+            return m
+        time.sleep(2.0)
+    return None
+
+
 def host_bytes():
     if not host_path:
         return "(no volume mounted)"
@@ -74,10 +107,7 @@ def host_bytes():
 
 
 print("volume:", VOL or "(no G: - host-side checks skipped)")
-reopen()
-# ask twice: the first frame after opening the port can be swallowed while the
-# connection settles, and a probe that flakes on hello is a probe nobody trusts.
-m = ask({"id": 1, "cmd": "hello"}) or ask({"id": 1, "cmd": "hello"})
+m = reply("hello", 1)
 caps = (m or {}).get("data", {}).get("caps", {})
 print("hello  -> version=%s caps.cfg=%s" % ((m or {}).get("data", {}).get("version"), caps.get("cfg")))
 if caps.get("cfg", {}).get("writable") is False:
@@ -96,9 +126,9 @@ print("get    -> ok=%s bytes=%s equal=%s" % ((m or {}).get("ok"), d.get("bytes")
 # the port is gone before the bytes can be collected.
 print("reset  ->", ask({"id": 5, "cmd": "reset", "args": {}}, 0.12), "(the port drops here)")
 s.close()
+s = None
 time.sleep(7.0)
-reopen()
-m = ask({"id": 6, "cmd": "cfg.get"})
+m = reply("cfg.get", 6)
 d = (m or {}).get("data", {})
 print("get    -> survived reboot: %s" % (d.get("text") == SNAP))
 print("host   -> sees the same bytes: %s" % (host_bytes() == SNAP.encode()))
