@@ -1511,6 +1511,17 @@ def cmd_echo(args):
     return {"ok": True, "data": {"echo": args.get("msg")}}
 
 
+_reset_after_reply = False
+
+
+def cmd_reset(args):
+    # boot.py only runs on a hardware reset, so a deploy that touched it used to end
+    # with someone walking to the board and pressing RST. This removes the walk.
+    global _reset_after_reply
+    _reset_after_reply = True
+    return {"ok": True, "data": {"reset": "pending"}}
+
+
 def cmd_gpio_cfg(args):
     apply_cfg(
         int(args.get("in", 0)),
@@ -1658,6 +1669,7 @@ COMMANDS = {
     "ping": cmd_ping,
     "hello": cmd_hello,
     "echo": cmd_echo,
+    "reset": cmd_reset,
     "gpio.cfg": cmd_gpio_cfg,
     "gpio.out": cmd_gpio_out,
     "gpio.state": cmd_gpio_state,
@@ -1686,6 +1698,7 @@ COMMANDS = {
 
 
 def dispatch(req):
+    global _reset_after_reply
     rid = req.get("id")
     handler = COMMANDS.get(req.get("cmd"))
     if not handler:
@@ -1697,6 +1710,12 @@ def dispatch(req):
             resp = {"ok": False, "error": "%s: %s" % (type(e).__name__, e)}
     resp["id"] = rid
     send(resp)
+    if _reset_after_reply:
+        # Reset happens after the reply has left, not inside the handler: a host that
+        # asked for a reboot still has to learn that the request was understood.
+        _reset_after_reply = False
+        time.sleep(0.25)  # give the CDC FIFO a chance to drain to the host
+        microcontroller.reset()
 
 
 # Caps are probed once at boot: the I2C sweep touches every legal pin pair, so

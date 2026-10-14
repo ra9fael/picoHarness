@@ -304,6 +304,19 @@
           return p.send({ id: m.id, ok: true, data: { version: "0.1.19-mock", caps: CAPS } });
         if (m.cmd === "echo")
           return p.send({ id: m.id, ok: true, data: { msg: m.args.msg } });
+        if (m.cmd === "reset") {
+          // The firmware answers first and resets about a quarter second later, because
+          // boot.py only runs on a hardware reset. A mock cannot make its port vanish, so
+          // only the observable half is simulated: the reply, then the same ready
+          // broadcast a power-on sends. Nothing in the UI issues reset yet; this handler
+          // exists so an offline harness never answers "unknown cmd".
+          p.send({ id: m.id, ok: true, data: { reset: "pending" } });
+          if (p.protocol)
+            setTimeout(function () {
+              p.push(enc.encode(JSON.stringify({ evt: "ready", app: "PicoHarness", version: "0.1.19-mock", pins: CAPS.gp.length, cp: [10, 3, 1], caps: CAPS }) + "\n"));
+            }, 400);
+          return;
+        }
         // The config vault, mirroring the firmware's cfg.* handlers: the text is
         // stored as given, only checked for being a snapshot, and never read.
         if (m.cmd === "cfg.get")
