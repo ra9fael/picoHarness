@@ -91,7 +91,7 @@ payload 第一个字节是 **kind**，标识这是哪种流：
 | `caps.i2c_pairs` | **有序对**数组，每对是 `[SCL, SDA]` |
 | `caps.uart` | `tx` 数组、`rx` 数组、`pairs` 有序对数组（`[TX, RX]`） |
 | `caps.spi` | `groups` 每组的 `sck/mosi/miso` 脚号数组，外加 `max_buses`、`max_cs`、`baud_ceiling` |
-| `caps.cfg` | 设备端配置保险箱：`path` 是它在卷上的文件名，`max_bytes` 是单次能写进去的上限。**这台固件没有 `cfg.*` 命令时整个字段缺席**，界面就不显示"保存到板子"那一组按钮（与 `pwm_pio` 缺席时不显示 HW / PIO 选择是同一条规则） |
+| `caps.cfg` | 设备端配置保险箱：`path` 是它在卷上的文件名，`max_bytes` 是单次能写进去的上限，`writable` 说代码到底能不能写这块卷（取 `storage.getmount("/").readonly` 的反值；没放 `boot.py` 的板子是 `false`，不带这个字段的旧固件按"能写"处理，因为主机这边无法自己判断）。**这台固件没有 `cfg.*` 命令时整个字段缺席**，界面就不显示"保存到板子"那一组按钮（与 `pwm_pio` 缺席时不显示 HW / PIO 选择是同一条规则） |
 | `caps.usb.data` | 协议是否跑在独立的 data 口上（`boot.py` 生效即为 true） |
 
 ### 2.0 脚号从哪来：封装 × 板级定义
@@ -399,6 +399,7 @@ MQTT 风格的开关，用来控制设备主动推什么。
 | `cfg.save` | `wrote N bytes, volume holds M` | 改名之后卷上的字节数和刚写的对不上 |
 | `cfg.get` | `/config.json is N bytes, over the 65536 limit` | 卷上那份大得反常——先报，不去读它 |
 | `cfg.save` | `OSError: [Errno 30] Read-only filesystem` | 板上的 `boot.py` 还是不带 `storage.remount(...)` 的旧版，或拷进去了但没硬复位——卷对代码仍是只读的 |
+| `cfg.clear` | `/config.json is on a read-only volume; delete it from the host` | 同上一条。只读卷上 `os.remove()` 和"文件本来就不在"撞成同一种 `OSError`，不先拦下来的话应答会说"没有文件"，而文件其实还好好地在卷上 |
 
 写入走 `config.json.tmp` → 删除旧文件 → 改名，读完字节数再核对一遍，然后 `os.sync()`：
 掉电或主机拔线时，卷上要么是完整的旧配置，要么是完整的新配置，不会留下半份。
@@ -410,6 +411,12 @@ disable_concurrent_write_protection=True)`。CircuitPython 默认把卷对**代�
 （复位、拔插、弹出）才追上板子写下的东西——实测连续覆盖两次、再等 20 秒，Explorer 里还是最早
 那一份，甚至板子已经删掉了它还显示着。所以"存到板子了没有"要用界面上的**载入**去问板子，别用
 资源管理器去看文件；要在 G: 上拖文件部署，先按一次 RESET 让两份视图对齐。
+
+这个前提只能在 `boot.py` 里成立，代码里没有自我更正的余地：10.3.1 上从 `code.py` 调
+`storage.remount()` 直接 `RuntimeError: Cannot remount path when visible via USB`。所以固件把
+结论如实报进 `caps.cfg.writable`（读的是 `storage.getmount("/").readonly`，注意这个属性名，
+没有 `.writable`、也没有 `.mount_point`），主机据此收起**保存到板子 / 删除板子配置**这两个必然
+失败的按钮；要换状态，就改 `boot.py` 再硬复位——界面上的**重启板子**就是这条命令的入口。
 
 ---
 

@@ -46,7 +46,8 @@ npm run build          # -> dist/index.html（自包含单文件）
    PWM 发生器上用得到，缺了不影响硬件 slice，界面只是不再出现 HW / PIO 选择。
 3. 把 `src/fw/boot.py` 和 `src/fw/code.py` 复制到卷根目录（根目录若有 `main.py` 要删掉，它会顶掉 `code.py`），
    然后按一次 RESET：`boot.py` 只有硬复位才生效，第二个 CDC 口是它打开的，板子能写自己的
-   `config.json` 也是它打开的。
+   `config.json` 也是它打开的。这一次得动手按；以后链路通了可以用界面上的**重启板子**，
+   它发的就是 `reset` 命令。
 4. 用 Chrome / Edge 打开 `dist/index.html`，点"连接设备"，在选择框里把这块板的所有条目全选。
 
 完整装机与板子侧检查见 [使用手册 §2](./docs/zh/01_GUIApp_FW_Manual/README.md#2-准备板子)。
@@ -105,6 +106,7 @@ SPI 总线泳道（按实测引脚组，允许半总线、每条最多 4 路 CS�
 调试控制台（监听 / REPL / 复制导出）、配置持久化（浏览器 localStorage）+ 导出/导入/清空菜单、
 中英双语界面、双 CDC（协议独占数据口、并行 nonce ping 认口 + 角色缓存显示在状态栏、
 自动挂日志口、进 REPL 不用重选端口）、设备端 `config.json`（板子卷上的第三份配置，手动保存才改写，
-连接时按"板子 > 浏览器 > 空白"取用，冲突才问）。
+连接时按"板子 > 浏览器 > 空白"取用，冲突才问；卷对代码只读时按板子自报的 `caps.cfg.writable`
+收起保存与删除）、**重启板子**按钮（`reset` 命令，等同按 RESET，动过 `boot.py` 不用再走到板前）。
 
 下一步：独立错误面板。

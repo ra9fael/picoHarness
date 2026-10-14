@@ -82,7 +82,7 @@ The device sends one event on startup:
 | `caps.i2c_pairs` | Array of **ordered pairs**, each pair `[SCL, SDA]` |
 | `caps.uart` | `tx` array, `rx` array, and `pairs`, an array of ordered pairs (`[TX, RX]`) |
 | `caps.spi` | `groups`, the `sck/mosi/miso` pin arrays of each group, plus `max_buses`, `max_cs` and `baud_ceiling` |
-| `caps.cfg` | The device-side config vault: `path` is its file on the volume, `max_bytes` the largest single write it accepts. **The field is absent when this firmware has no `cfg.*` commands**, and the UI then hides the "Save to board" rows — the same rule that hides the HW / PIO switch when `pwm_pio` is missing |
+| `caps.cfg` | The device-side config vault: `path` is its file on the volume, `max_bytes` the largest single write it accepts, `writable` whether the board's own code can write that volume at all (the inverse of `storage.getmount("/").readonly`; `false` on a board without `boot.py`, and firmware too old to report it is treated as writable because the host cannot decide this on its own). **The field is absent when this firmware has no `cfg.*` commands**, and the UI then hides the "Save to board" rows — the same rule that hides the HW / PIO switch when `pwm_pio` is missing |
 | `caps.usb.data` | Whether the protocol runs on its own data port (true once `boot.py` has taken effect) |
 
 ### 2.0 Where the pin numbers come from: package × board definition
@@ -305,6 +305,7 @@ Error strings, with the command that raises them:
 | `cfg.save` | `wrote N bytes, volume holds M` | after the rename the file on the volume is not the size just written |
 | `cfg.get` | `/config.json is N bytes, over the 65536 limit` | the stored file is implausibly large — reported before it is read |
 | `cfg.save` | `OSError: [Errno 30] Read-only filesystem` | the board still runs a `boot.py` without `storage.remount(...)`, or it was copied but never hard-reset — the volume stays read-only for the code |
+| `cfg.clear` | `/config.json is on a read-only volume; delete it from the host` | same cause. On a read-only mount `os.remove()` fails exactly like an absent file does, so without this check the reply would claim "no file there" while the file is still on the volume |
 
 The write goes through `config.json.tmp`, then removes the old file, then renames, re-checks the
 byte count on the volume and calls `os.sync()`: a power cut or an unplugged cable mid-save leaves
@@ -319,6 +320,15 @@ first copy, and it went on showing a file the board had already deleted. So ask 
 save landed — the UI's **Load from board** does that — rather than looking at the drive. And before
 dragging files onto G: to deploy, press RESET once so the two views agree about which clusters are
 free.
+
+That prerequisite can only be established in `boot.py`, and the code has no way to correct itself: on
+10.3.1 calling `storage.remount()` from `code.py` fails outright with
+`RuntimeError: Cannot remount path when visible via USB`. So the firmware reports the verdict instead, as
+`caps.cfg.writable`, read from `storage.getmount("/").readonly` — that is the attribute's name on this
+build, there is no `.writable` and no `.mount_point` on the object — and the host uses it to grey out the
+two buttons that could only fail. Changing the state means editing `boot.py` and taking a hard reset; the
+UI's **Reboot board** button is precisely that command, so a deployment that touched `boot.py` no longer
+needs anyone to walk to the board.
 
 ---
 

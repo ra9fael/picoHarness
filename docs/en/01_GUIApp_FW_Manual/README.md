@@ -122,6 +122,21 @@ but do not build on that shape: the next release is dual-port only.
 
 To disconnect, click the same button again (its label changes to "Disconnect").
 
+One more button sits in that top row: **Reboot board**, whose tooltip is "Same as pressing RESET: boot.py runs
+again, this link drops, and the workbench re-applies its config after reconnecting". It sends the `reset` command:
+the board gets its reply out first, then calls `microcontroller.reset()` a quarter second later, which is exactly
+what walking over and pressing RESET does — **only a hard reset re-runs `boot.py`**, the browser-side soft reboot
+(Ctrl-D) does not, so this is the step that makes "I copied boot.py" finish without touching the board. It asks
+first, with "Reboot the board? The serial link drops and whatever the board is running right now — PWM, buses,
+streams — is wiped. Click Connect again once it is back.", and once the board is back the link is gone: wait a few
+seconds and press **Connect** again. Like Ping and Echo, it is only clickable while the link is ready and the
+console panel is in **Monitor** mode.
+
+Two cases it cannot help with: the board is not running `code.py` at all (parked at the REPL, or crashed) — that is
+what the `Ctrl+C` + `Ctrl+D` wake-up in the connect flow above is for; and firmware older than the `reset` command —
+then the console prints "Reboot failed: unknown cmd: reset", which means the `code.py` on G: is stale, so copy the
+current one and press RESET once by hand.
+
 ---
 
 ## 4. The Workbench
@@ -486,6 +501,15 @@ Three action buttons: clear, copy all, export as a txt file.
   - When the connected firmware reports `caps.cfg`, a divider and three more rows appear: **Save to board**,
     **Load from board**, **Delete board config**. Older firmware shows no such rows, so it is never handed a
     command it cannot answer.
+  - Those rows also pass a second gate reported by the board itself during the handshake, `caps.cfg.writable`.
+    When the volume is read-only for the board's code (the `boot.py` on the board has no `storage.remount(...)`,
+    or it was copied but never hard-reset), **Save to board** and **Delete board config** are greyed out,
+    **Load from board** stays clickable, and the small line at the bottom of the menu changes to "The volume is
+    read-only for the board's code, so saving and deleting are off: copy this repository's boot.py onto G: and
+    press RESET." Nothing on this side of the cable can flip that switch, and there
+    is no escape hatch in the code either: asking from `code.py` fails outright with
+    `RuntimeError: Cannot remount path when visible via USB`, so editing `boot.py` is the only route. Firmware
+    that does not report the field is treated as able to write, and you find out by pressing the button.
   - Those three rows touch only the board's copy, and **the board's copy changes only when you save it**: loading
     never writes back to the board, and clearing the configuration leaves it alone. To move a setup between two
     boards, save on one, connect the other, load.

@@ -50,7 +50,8 @@ npm run build          # -> dist/index.html (self-contained single file)
    and the UI simply hides the HW / PIO choice.
 3. Copy `src/fw/boot.py` and `src/fw/code.py` to the root of the volume (remove any `main.py` there, it would win over
    `code.py`), then press RESET — `boot.py` only takes effect on a hard reset, and it is what opens the second CDC port
-   and lets the board write `config.json` to its own volume.
+   and lets the board write `config.json` to its own volume. That first time needs a finger on the button; once the
+   link is up the UI's **Reboot board** does the same thing, since it sends exactly the `reset` command.
 4. Open `dist/index.html` in Chrome or Edge, click **Connect**, and select every entry of the board in the port picker.
 
 Full setup, including the board-side checks: [User Manual §2](./docs/en/01_GUIApp_FW_Manual/README.md#2-prepare-the-board).
@@ -115,6 +116,8 @@ debug console (monitor / REPL / copy and export), browser-side configuration per
 export/import/clear menu, bilingual UI, dual CDC (protocol on its own port, parallel nonce-ping port
 identification with cached roles shown in the status bar and an auto-attached log port, REPL without
 re-picking ports), and a device-side `config.json` — a third copy on the board's volume, written only
-when you save it, resolved at connect time as board > browser > empty with a question only on a real conflict.
+when you save it, resolved at connect time as board > browser > empty with a question only on a real conflict, and with
+save/delete folded away when the board reports its own volume read-only (`caps.cfg.writable`) — plus a **Reboot board**
+button that runs the `reset` command.
 
 Next: standalone error panel.

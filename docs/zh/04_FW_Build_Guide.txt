@@ -63,6 +63,16 @@ remount 那行的两个参数都是实测出来的，别"顺手收紧"：只写 
 disable_concurrent_write_protection=True 才是两边都能写。代价是 Windows 看 G: 是缓存，
 板子写了什么要等卷重新读一次（复位/拔插）才看得见——按界面里的"从板子载入"去确认，别开
 资源管理器看；要在 G: 上拖文件部署，先复位一次让两边视图对齐。
+这份 remount 只在 boot.py 里有效力：code.py 里调 storage.remount() 直接被拒
+（RuntimeError: Cannot remount path when visible via USB），所以"这版 boot.py 到底是哪种挂法"
+只能由板子在握手时报出来 —— caps.cfg.writable 读的是 storage.getmount("/").readonly
+（10.3.1 上就这个属性名，没有 .writable，也没有 .mount_point）。false 时界面上的
+"保存到板子 / 删除板子配置"是灰的，cfg.clear 也会先拒一句"...is on a read-only volume;
+delete it from the host"，而不是假装文件不存在。
+想验证这两态真的跟着 boot.py 走：python tools/mount_ab.py COM7。它把 G:\boot.py 换成
+readonly=True 那一行、用 reset 命令硬复位、量完再拷回本仓库那份并复位，最后把板子原有配置放回去，
+所以全程不用碰板子，也不会给你留下一份改过的 boot.py。跑之前它要求 G:\boot.py 就是本仓库这一版，
+否则拒绝开始（起点不明朗的 A/B 没有意义）。
 G: 上没有 lib/ 时说明 circup 没装成功，code.py 会以 ImportError 起不来。
 
 界面"保存到板子"写的是 G:\config.json（临时文件 config.json.tmp 改名而来）。Web Serial 没有
@@ -133,6 +143,16 @@ ready.caps 里没有 uart/i2c_pairs/spi —— 这不是前端 bug，是 G:\code
 "保存到板子"报 OSError: [Errno 30] Read-only filesystem —— 同一个根因的另一面：
 G:\boot.py 里缺 storage.remount(...)，或者拷了没硬复位。卷对代码仍是只读的，
 cfg.get/cfg.clear 会照常应答（读不需要写权限），所以只有写入暴露这个问题。
+复位之后 COM 口"打得开、写不进"（write timeout，或 PermissionError: The device does not
+recognize the command），设备管理器里两个口都写着 OK —— 这是 Windows 把句柄发给了上一个
+USB 实例，不是板子挂了。判据是板子自己那份：控制台上 print(usb_cdc.data.connected) 为
+False 而 console 为 True，说明数据口的 host 侧没接上。脚本侧的解法是关掉句柄重开、
+直到真收到应答为止（open 成功不算数，tools/mount_ab.py 就是这么重试的）；再不行就再来一次
+硬复位，Windows 会重新建实例。
+板子刚写过 config.json，主机就急着往 G: 上改文件，可能把那份挤掉：两边对"哪些簇空闲"的
+判断还没对齐（实测过一次——A/B 脚本存完快照立刻从主机改写 boot.py，复位后 cfg.get 就找不
+到文件了；中间插一次复位让 Windows 重读卷，之后同样的顺序 82 字节完好）。所以从主机写 G:
+之前先复位一次。
 ready.caps.spi 里的引脚组和别处实测不一致 —— 那是 SPI_GROUPS 这张静态表的问题，
 它是 pico-sdk hardware/gpio.h F1 列的完整转录（GP0..GP28 行另有上板实测逐行确认），
 开机不做 SPI 扫描，也别去改探测逻辑。注意出厂前它还按 caps.gp 投影一次：

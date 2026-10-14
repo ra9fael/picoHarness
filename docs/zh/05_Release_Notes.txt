@@ -8,7 +8,7 @@ PicoHarness 版本说明
 
 配置有了第三个去处：板子的卷。之前只有两份——浏览器 localStorage 和你手动导出的 JSON 文件，
 这一版加上 G:\config.json，命令是 `cfg.get` / `cfg.save` / `cfg.clear`，
-`ready.caps` 里对应新增 `cfg`（`path` + `max_bytes`，上限 65536）。
+`ready.caps` 里对应新增 `cfg`（`path`、`max_bytes` 上限 65536、`writable`）。
 
 固件是保险箱，不是读者：`cfg.save` 只确认送来的是合法 JSON、顶层带 `pins` 数组，然后原样存，
 不解析任何一个字段，**也不在上电时照它给引脚编程**。所以快照格式的主人仍然只有一个
@@ -28,9 +28,26 @@ CircuitPython 眼里的卷是只读的，`cfg.save` 回 `OSError: [Errno 30] Rea
 `config.json`；要往 G: 拖文件之前先按一次 RESET，让两个视图对同一片空闲簇达成一致。
 boot.py 只在硬复位时执行，Ctrl-D 软复位不跑它。
 
+只读那一态现在不用试出来：板子在握手时直接报 `caps.cfg.writable`，读的是
+`storage.getmount("/").readonly`（10.3.1 上就这个属性名——对象上没有 `.writable`，也没有
+`.mount_point`）。之所以非得板子自己说，是因为代码里没有任何自我更正的余地：从 code.py 调
+`storage.remount()` 会被直接拒掉（`RuntimeError: Cannot remount path when visible via USB`），
+换 boot.py 再硬复位是唯一的路。于是 `false` 时界面上的**保存到板子 / 删除板子配置**是灰的，
+底部小字改成"板子的卷对代码只读，保存与删除都用不了：把本仓库的 boot.py 拷到 G: 再按 RESET"，
+`cfg.clear` 也先回一句"... is on a read-only volume; delete it from the host"——只读卷上
+`os.remove()` 和"文件本来就不在"撞成同一种 `OSError`，不拦的话应答会说没文件，而文件还好好在卷上。
+不带这个字段的旧固件按"能写"处理，因为主机这边猜不出来。`tools/mount_ab.py` 是把这两态跑一遍的那个：
+它改 boot.py、用 reset 命令硬复位、量完再恢复本仓库那份并复位，全程不碰板子。Pico 2 上实测
+`writable` 跟着 boot.py 双向翻转（true → false → true），中间那半程 `cfg.save` 回 `Errno 30`、
+`cfg.clear` 回拒绝，而 `cfg.get` 照样读出板子早先写下的 82 字节。
+
 新增命令 `reset`，COMMANDS 表从 27 条变 28 条：先把 `{"reset":"pending"}` 答出去，等 0.25 秒
 让字节走完 CDC 缓冲，再 `microcontroller.reset()`，效果与按 RESET 键相同——boot.py 会重跑。
-部署动过 boot.py 之后不用再走到板子前面。界面这一版还没有触发它的按钮；mock 里同样备了这条
+部署动过 boot.py 之后不用再走到板子前面。界面顶部也补了触发它的按钮 **重启板子**（悬停说明
+"等同于按 RESET：重跑 boot.py，链路会断，重连后界面会重新下发配置"），点下去先弹确认框
+"重启板子？串口链路会断开，板子上正在跑的 PWM、总线等即时配置会清空；等它起来后在界面重新点"连接设备"。"，
+随后控制台打"已请求复位，板子正按 boot.py 重启；重新点"连接设备"即可"；固件旧到没有这条命令时报
+"重启请求失败: unknown cmd: reset"，说的就是 G: 上那份 code.py 没更新。mock 里同样备了这条
 命令，离线夹具不会回 "unknown cmd"。
 
 界面顶部**配置 ▾**菜单多一条分隔线和三行（保存到板子 / 从板子载入 / 删除板子配置），

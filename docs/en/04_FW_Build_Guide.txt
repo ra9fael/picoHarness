@@ -74,6 +74,17 @@ disable_concurrent_write_protection=True is what lets both sides write. The pric
 Windows reads G: from a cache, so what the board wrote only becomes visible when the volume is
 re-read (a reset or a replug): confirm a save with the UI's "Load from board", not with Explorer,
 and press RESET once before dragging files onto G: so both views agree about free clusters.
+That remount only has force in boot.py: calling storage.remount() from code.py is refused outright
+(RuntimeError: Cannot remount path when visible via USB), so "which of the two mounts is this board
+running" can only be reported by the board itself, during the handshake -- caps.cfg.writable reads
+storage.getmount("/").readonly (that is the attribute name on 10.3.1; there is no .writable and no
+.mount_point). When it is false the UI greys out "Save to board / Delete board config", and cfg.clear
+answers "... is on a read-only volume; delete it from the host" instead of pretending the file is absent.
+To check that both states really follow boot.py: python tools/mount_ab.py COM7. It rewrites G:\boot.py
+with the readonly=True line, takes a hard reset through the reset command, measures, then restores this
+repository's boot.py, resets again and puts back whatever config was on the board -- so nobody has to
+touch the board and no edited boot.py is left behind. It refuses to start unless G:\boot.py is exactly
+the shipped version, because an A/B with an unknown starting point measures nothing.
 If G: has no lib/, circup did not install successfully and code.py will fail to start with an
 ImportError.
 
@@ -157,6 +168,18 @@ board was not hard-reset afterwards (Ctrl-D does not count).
 from the other side: G:\boot.py lacks storage.remount(...), or it was copied without a hard reset,
 so the volume is still read-only for the code. cfg.get and cfg.clear keep answering — reading
 needs no write permission, so only the write path exposes it.
+After a reset the COM port opens fine but every write fails (write timeout, or PermissionError:
+The device does not recognize the command) while Device Manager shows both ports as OK — that is
+Windows handing out a handle to the previous USB instance, not a dead board. Ask the board itself:
+print(usb_cdc.data.connected) on the console says False while the console says True, i.e. the host
+side of the data port is not attached. A script recovers by closing the handle and reopening until
+a real reply arrives — a successful open proves nothing, which is how tools/mount_ab.py retries —
+and if that does not help, take one more hard reset so Windows builds a fresh instance.
+Writing to G: from the host right after the board wrote config.json can evict that file, because
+the two views have not yet agreed about which clusters are free (measured: the A/B script saved a
+snapshot, immediately rewrote boot.py from the host, and cfg.get could no longer find the file;
+with a reset in between so Windows re-reads the volume, the same sequence left all 82 bytes
+intact). So reset once before writing to G: from the host.
 ready.caps.spi disagreeing with what a sweep would find — that is the static SPI_GROUPS table, a full
 transcription of the F1 column of pico-sdk hardware/gpio.h (whose GP0..GP28 rows were additionally
 confirmed on the board by tools/spi_probe.py, row for row). There is deliberately no SPI sweep at boot.

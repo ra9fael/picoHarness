@@ -9,7 +9,7 @@ recognise new commands and answers "unknown cmd".
 
 The configuration has a third home: the board's own volume. There used to be two — browser localStorage and the JSON file you
 export by hand — and this version adds G:\config.json with `cfg.get` / `cfg.save` / `cfg.clear`. `ready.caps` gains `cfg`
-(`path` plus `max_bytes`, the limit being 65536).
+(`path`, `max_bytes` with the limit at 65536, and `writable`).
 
 The firmware is a vault, not a reader. `cfg.save` only checks that what it was sent parses as JSON with a `pins` array at the
 top level, then stores it verbatim: it interprets no field and **does not program its own pins from it at boot**. The snapshot
@@ -30,9 +30,29 @@ only once the volume is read again. Verify a board save with **Load from board**
 `config.json` in Explorer, and press RESET once before dragging files onto G: so the two views agree about which clusters are
 free. boot.py only runs on a hardware reset — Ctrl-D does not re-run it.
 
+The read-only half no longer has to be discovered by pressing a button: the board reports
+`caps.cfg.writable` during the handshake, read from `storage.getmount("/").readonly` (that is the attribute
+name on 10.3.1 — the object has no `.writable` and no `.mount_point`). The board has to be the one saying it,
+because there is no self-correction available in the code: calling `storage.remount()` from `code.py` is
+refused outright with `RuntimeError: Cannot remount path when visible via USB`. With the flag false the UI
+greys out **Save to board / Delete board config**, and the menu's bottom line becomes "The volume is
+read-only for the board's code, so saving and deleting are off: copy this repository's boot.py onto G: and
+press RESET." `cfg.clear` likewise answers "... is on a read-only volume; delete it from the host" instead of
+pretending the file is absent — on a read-only mount `os.remove()` fails exactly like an absent file does.
+Firmware that does not report the flag is treated as writable, since the host cannot work it out alone. The
+two states are now measured rather than argued: `tools/mount_ab.py` rewrites boot.py, resets through the
+`reset` command, and restores the shipped file, and on this Pico 2 `writable` followed boot.py in both
+directions (true → false → true), `cfg.save` answered `Errno 30` and `cfg.clear` its refusal in the middle
+half, while `cfg.get` went on reading the 82 bytes the board had written earlier.
+
 New `reset` command, which takes the COMMANDS table from 27 to 28 entries: it sends `{"reset":"pending"}` first, waits 0.25 s
 for those bytes to leave the CDC buffer, then calls `microcontroller.reset()` — the same thing pressing RESET does, boot.py
-included. A deploy that touched boot.py no longer needs someone to walk to the board. No UI button issues it yet; the mock
+included. A deploy that touched boot.py no longer needs someone to walk to the board, and the UI now has the
+button that issues it: **Reboot board** in the top row, which asks first ("Reboot the board? The serial link
+drops and whatever the board is running right now — PWM, buses, streams — is wiped. Click Connect again once
+it is back.") and then notes "Reset requested; the board is restarting through boot.py. Click Connect again.".
+On firmware too old to know the command the note reads "Reboot failed: unknown cmd: reset", which is the stale
+`code.py` on G: talking. The mock
 implements it as well so an offline harness never answers "unknown cmd".
 
 The **Config ▾** menu gains a divider and three rows (Save to board / Load from board / Delete board config), and clicking
