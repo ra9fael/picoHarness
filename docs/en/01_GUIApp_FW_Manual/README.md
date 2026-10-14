@@ -498,6 +498,13 @@ Three action buttons: clear, copy all, export as a txt file.
     reports `Imported {n} entries`. A file that is not a PicoHarness config is rejected with `Import failed: …`.
   - **Clear config** asks first ("Clear the saved configuration? Lane bindings, PWM settings and buses all return to
     unassigned."), then drops every binding and deletes the browser copy as well.
+  - Every operation that replaces the whole configuration - **Import config**, **Clear config**, **Load from board** -
+    also takes back from the board whatever the new configuration no longer asks for: a channel the old one left
+    running gets `pwm.stop` for PWM, `adc.stop` (and its subscription) for ADC, and the matching `*.release` for an
+    I2C, UART or SPI bus. The reconciliation poll only ever pushes what the workbench wants and never withdraws
+    anything, so without this step the board would keep producing an output the interface no longer shows. A PWM
+    channel the new configuration still binds is re-sent too, because frequency and duty are not in any of the masks
+    the poll compares.
   - When the connected firmware reports `caps.cfg`, a divider and three more rows appear: **Save to board**,
     **Load from board**, **Delete board config**. Older firmware shows no such rows, so it is never handed a
     command it cannot answer.

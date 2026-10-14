@@ -64,12 +64,28 @@ loading never writes back, and clearing the configuration leaves it alone. Firmw
 rows, so it is never handed a command it cannot answer — the same rule that hides the HW/PIO switch when `caps.pwm_pio` is
 missing.
 
+Every operation that replaces the whole configuration (Import config / Clear config / Load from board) now also takes
+back from the board what the new configuration no longer asks for: `pwm.stop` for a PWM channel, `adc.stop` plus the
+`adc.<pin>` unsubscribe for a monitor, and the matching `*.release` for an I2C, UART or SPI bus. The withdrawal has to
+happen at the replacement point, because the reconciliation poll only ever pushes what the workbench wants and never
+withdraws — before this, swapping the configuration left the board driving a channel the interface no longer showed,
+until a reset. Measured on the mock: bind GP6 as PWM, GP26 as ADC and an SPI bus with id 7, replace all of it with an
+empty configuration, and the wire carries exactly `pwm.stop{pin:6}`, `unsub{adc.26}`, `adc.stop{pin:26}` and
+`spi.release{id:7}`, with the harness's device state going from `{6:pwm} + {7:spi}` to empty. The same experiment run
+without the withdrawal step (the model edited behind the workbench's back) leaves `{6:pwm}` on the device through three
+poll cycles, which is the leak this closes. A PWM channel the new configuration still binds is re-sent as well:
+frequency and duty are in none of the masks the poll compares, so a file that only re-tuned a live channel used to
+never reach the board.
+
 Consistency fix outside the protocol: the mock used to report every GPIO mask as zero in `gpio.state`, so any bound pin looked
 like drift once a second and re-sent a `gpio.cfg` the mock did not implement — a smoke test filled the console with
 `unknown cmd: gpio.cfg`. The mock now keeps an owner table too, which makes the GPIO lane testable offline.
 
 Save, load, survival across a reboot, the three refusals (not JSON, not a snapshot, over the limit) and `reset` followed by a
 fresh `ready` on the host side are all exercised end to end by `tools/vault_probe.py`, which was run against the Pico 2.
+After each reset it now closes and reopens the port until the board answers, the rule `tools/mount_ab.py` measured:
+Windows leaves a handle on the previous USB instance, whose first write fails, so a port that opens is not yet a board
+that replies.
 
 Known limitation: Web Serial cannot delete a file on the volume, so "Delete board config" only removes the path code.py knows
 about. Taking G:\config.json off the volume for good is still a trip to Explorer, though reflashing a UF2 or formatting the
