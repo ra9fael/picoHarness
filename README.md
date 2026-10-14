@@ -1,5 +1,13 @@
 # PicoHarness
 
+<details>
+
+   <summary>Screenshots</summary>
+
+   <img width="1394" height="1395" alt="Image" src="https://github.com/user-attachments/assets/6e4d0473-2a05-473c-8dbf-81bb1f20107a" />
+
+</details>
+
 [![中文](https://img.shields.io/badge/Lang-中文-green.svg)](./README.md) [![English](https://img.shields.io/badge/Lang-English-blue.svg)](./README.en.md)
 
 一块跑 CircuitPython 的 Pico，一个 HTML 文件，浏览器直连 USB 串口。
