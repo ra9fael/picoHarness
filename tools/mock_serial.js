@@ -94,7 +94,9 @@
     // The device-side config vault (firmware cfg.get/cfg.save/cfg.clear). The mock
     // keeps it in a variable: same refusal of non-snapshot text, same reply fields,
     // and it survives a program restart the way the real file survives a reboot.
-    cfg: { path: "/config.json", max_bytes: 65536 },
+    // window.__MOCK_READONLY = a board whose boot.py never remounted the volume:
+    // writable is false and both write paths answer the way Errno 30 does.
+    cfg: { path: "/config.json", max_bytes: 65536, writable: !window.__MOCK_READONLY },
   };
 
   // The group a requested data-pin set belongs to, or null when it spans two (the
@@ -329,6 +331,8 @@
                 : { text: p.cfgText, path: CAPS.cfg.path, bytes: p.cfgText.length },
           });
         if (m.cmd === "cfg.save") {
+          if (!CAPS.cfg.writable)
+            return p.send({ id: m.id, ok: false, error: "OSError: [Errno 30] Read-only filesystem" });
           var txt = m.args && m.args.text;
           if (typeof txt !== "string")
             return p.send({ id: m.id, ok: false, error: "need args.text" });
@@ -346,6 +350,8 @@
           return p.send({ id: m.id, ok: true, data: { bytes: txt.length, path: CAPS.cfg.path } });
         }
         if (m.cmd === "cfg.clear") {
+          if (!CAPS.cfg.writable)
+            return p.send({ id: m.id, ok: false, error: "/config.json is on a read-only volume; delete it from the host" });
           var had = p.cfgText !== null;
           p.cfgText = null;
           return p.send({ id: m.id, ok: true, data: { removed: had, path: CAPS.cfg.path } });
@@ -522,6 +528,24 @@
     requests: 0,
     get requestPortCalls() {
       return this.requests;
+    },
+    // Live handle on the capability table, so a test can flip one field and let the
+    // board re-announce itself the way a reboot with a different boot.py would.
+    caps: CAPS,
+    ready: function () {
+      if (!data.protocol) return;
+      data.push(
+        enc.encode(
+          JSON.stringify({
+            evt: "ready",
+            app: "PicoHarness",
+            version: "0.1.19-mock",
+            pins: CAPS.gp.length,
+            cp: [10, 3, 1],
+            caps: CAPS,
+          }) + "\n"
+        )
+      );
     },
     dev: function (text) {
       cons.push(enc.encode(text));

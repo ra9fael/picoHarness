@@ -80,6 +80,10 @@ reopen()
 m = ask({"id": 1, "cmd": "hello"}) or ask({"id": 1, "cmd": "hello"})
 caps = (m or {}).get("data", {}).get("caps", {})
 print("hello  -> version=%s caps.cfg=%s" % ((m or {}).get("data", {}).get("version"), caps.get("cfg")))
+if caps.get("cfg", {}).get("writable") is False:
+    # boot.py on this board has no remount() line, so every write below is expected
+    # to fail with Errno 30 - tools/mount_ab.py is the probe for that state.
+    print("         NOTE: volume read-only for code.py; save steps will report Errno 30")
 print("clear  ->", ask({"id": 2, "cmd": "cfg.clear"}), "(start from empty)")
 
 m = ask({"id": 3, "cmd": "cfg.save", "args": {"text": SNAP}})
