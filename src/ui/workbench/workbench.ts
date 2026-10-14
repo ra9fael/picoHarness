@@ -40,6 +40,11 @@ const BADGES: {
   { gate: "spi", cap: C_MISO, t: "DI", k: "cap_di", first: true },
 ];
 
+// What the board was told to hold, captured before a replacement wipes the model.
+// Pin numbers and bus ids: exactly the two kinds of thing a device keeps doing
+// after the workbench stops asking for them.
+type Held = { pwm: number[]; adc: number[]; i2c: number[]; uart: number[]; spi: number[] };
+
 export class Workbench {
   readonly model = new PinModel();
   private api: FuncApi;
@@ -231,14 +236,55 @@ export class Workbench {
     this.model.applyEvent(m);
   }
 
+  // What the device was told to own, as pin numbers and bus ids. Cheap to take, and
+  // the only way to know what a whole-config replacement is about to drop.
+  private heldByDevice(): Held {
+    const { model } = this;
+    const pins = (role: number): number[] => {
+      const out: number[] = [];
+      for (let n = 0; n < SLOTS; n++) if (model.roles[n] === role) out.push(n);
+      return out;
+    };
+    return {
+      pwm: pins(R_PWM),
+      adc: pins(R_ADC),
+      i2c: model.buses.map((b) => b.id),
+      uart: model.uartBuses.map((b) => b.id),
+      spi: model.spiBuses.map((b) => b.id),
+    };
+  }
+
+  // The drift poll only ever re-issues what the model asks for; it never takes
+  // anything back. So a config that replaces the whole model does the subtraction
+  // here: a PWM channel the board still generates, an ADC monitor still subscribed,
+  // a bus still holding its pins — invisible to the workbench, still live on the
+  // fixture. What the new config keeps is left to the normal path, except PWM:
+  // frequency and duty appear in no drift signature, so a file that only re-tunes a
+  // running channel has to be pushed. GPIO needs neither, because its whole mask
+  // goes over on every send and the firmware releases the pins that fell out of it.
+  private reconcileReplaced(held: Held): void {
+    const { model } = this;
+    for (const n of held.pwm) if (model.roles[n] !== R_PWM) this.pwm.stop(n);
+    for (const n of held.adc) if (model.roles[n] !== R_ADC) this.adc.stop(n);
+    for (const id of held.i2c) if (!model.buses.some((b) => b.id === id)) this.i2c.forget(id);
+    for (const id of held.uart)
+      if (!model.uartBuses.some((b) => b.id === id)) this.uart.forget(id);
+    for (const id of held.spi)
+      if (!model.spiBuses.some((b) => b.id === id)) this.spi.forget(id);
+    if (this.link.state === "ready") this.pwm.scheduleAll();
+  }
+
   // Config menu. An imported file goes through the same snapshot the browser
-  // already stores, so the normal save + drift path pushes it to the device.
+  // already stores, so what it adds reaches the device by the normal drift path,
+  // and what it drops is withdrawn at the replacement point.
   exportConfig(): string {
     return configText(this.model);
   }
 
   importConfig(text: string): number {
+    const held = this.heldByDevice();
     const n = importSnapshot(this.model, text);
+    this.reconcileReplaced(held);
     this.afterConfigChange();
     // A file may come from another board: with a live link the freshly loaded
     // bindings are checked against the caps we already know.
@@ -247,7 +293,9 @@ export class Workbench {
   }
 
   resetConfig(): void {
+    const held = this.heldByDevice();
     blankConfig(this.model);
+    this.reconcileReplaced(held);
     this.afterConfigChange();
     clearStored();
   }

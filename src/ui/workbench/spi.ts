@@ -163,18 +163,25 @@ export class SpiDriver {
   removeBus(busId: number): void {
     const api = this.api;
     if (!api) return;
+    this.forget(busId);
+    this.model.removeSpiBus(busId);
+    this.model.changed();
+    api.rerender();
+  }
+
+  // Teardown for a bus the model has already dropped, which is what a replaced
+  // config does to every bus the new file does not name: no card was clicked, so
+  // without this the board keeps owning the bus's lines until a reset.
+  forget(busId: number): void {
     const card = this.cards.get(busId);
-    if (card?.live && api.link.state === "ready") {
-      api.link.sendCmd("spi.release", { id: busId }).catch(() => {});
+    if (card?.live && this.api?.link.state === "ready") {
+      this.api.link.sendCmd("spi.release", { id: busId }).catch(() => {});
     }
     const t = this.cfgTimer.get(busId);
     if (t) clearTimeout(t);
     this.cfgTimer.delete(busId);
     card?.root.remove();
     this.cards.delete(busId);
-    this.model.removeSpiBus(busId);
-    this.model.changed();
-    api.rerender();
   }
 
   addBus(): void {
