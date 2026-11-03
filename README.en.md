@@ -13,6 +13,10 @@
 A Pico running CircuitPython, one HTML file, the browser talking straight to the USB serial port.
 This is the English copy; the Chinese version is [README.md](./README.md).
 
+**Live** (GitHub Pages, rebuilt on every push to main): [index.html](https://ra9fael.github.io/picoHarness/)
+(real hardware, needs Web Serial) · [mock.html](https://ra9fael.github.io/picoHarness/mock.html)
+(no-hardware demo, works in any browser)
+
 ---
 
 ## Documentation
