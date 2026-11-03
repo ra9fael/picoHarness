@@ -94,7 +94,45 @@ core/events.ts        极简 Emitter
 `usb_cdc.Serial` 是二进制流）
 写在 [04 构建指南](./docs/zh/04_FW_Build_Guide.txt)；线上格式见 [02 协议参考](./docs/zh/02_Library_User_Guide/README.md)。
 
-## 6. 开发与验证
+## 6. 性能瓶颈与改进方向
+
+### 6.1 为什么快不起来（成因）
+
+三层天花板叠在一起，从下往上：
+
+| 层 | 代码里的表现 | 后果 |
+| :--- | :--- | :--- |
+| 解释器 | 全部逻辑跑在 CircuitPython 一个 VM 线程上；ADC 采样是逐点 Python 调用（`_adc_val` → `analogio.value`），不碰 FIFO/DMA | 波形流 `ms` 下限 10 ms，行率封顶 100 Hz，多通道也只是逐行轮流读；与 DMA 采集差约三个数量级 |
+| 调度 | 五个 asyncio 任务全靠 `sleep` 轮询：命令 2 ms、UART 10 ms、GPIO 50 ms、ADC 100 ms | GPIO 边沿 50 ms 粒度，短脉冲必漏；任何一条命令的处理时间都会挤压其它任务的响应 |
+| 传输 | USB 全速 12 Mbit/s，两个 CDC 口共享；命令/事件走 JSON-lines 文本，`uart_rx` 把字节发成 `list(payload)` 数字数组 | 1 字节数据膨胀成 3–4 字节文本；高波特 UART 时 JSON 编解码同时吃 CPU 和带宽 |
+
+采集侧只有 PWM 用到了 PIO（还只是发生器），ADC 和数字输入都没有硬件采集路径。所以本项目的强项
+在**确定性**（引脚裁决、协议、配置持久化），不在**吞吐**——这是产品定位，不全是实现瑕疵。
+
+### 6.2 改进路线（按投入递增）
+
+| 阶段 | 做法 | 得到什么 | 代价 |
+| :--- | :--- | :--- | :--- |
+| A 协议瘦身（留 CircuitPython） | `uart_rx` / `spi.xfer` / `i2c.xfer` 改走二进制帧（kind 注册表已在），高频事件合批 | 高负载下 CPU 与带宽立刻宽裕 | 新帧类型要同步进协议文档 |
+| B 原生模块 | 采集路径下沉 C（CircuitPython native module），DMA 环形缓冲上抛批量样本 | 示波器带宽可到 10–100 kHz 量级 | 要维护 C 构建链，跨 CircuitPython 版本的 ABI 风险 |
+| C 换固件栈：Pico SDK + 虚拟网卡 | TinyUSB RNDIS/ECM + lwIP + 片上 HTTP/SSE（PicoLab 的路线）；双核分工：core0 网络/UI 服务，core1 专事 DMA 采集；PIO 上逻辑分析仪 | 仪器级采集（约 400 kHz 模拟、100 MS/s 数字），任意浏览器可用、免 Web Serial，手机也能开 | 固件整体重写；失去 REPL 现场调试与"拷 py 即部署"的迭代速度；开发周期变编译-烧写 |
+| D 混合：C 固件保留现有协议 | C 重写 code.py，但继续走双 CDC + JSON-lines，协议一条不变 | 采集性能上一个台阶，界面 7220 行 TS、工具链、工作台全部保留 | 无虚拟网卡的浏览器兼容红利；仍需完整 C 重写 |
+
+界面侧 `core/transport.ts` 已把字节管道隔离成一层，C/D 两条路都不必动 workbench 与模型层；
+若走 C 路线，`mock_serial.js` 也可以原样留作回归对照。先做 A（一周量级、零硬件风险），
+再决定要不要走到 C 或 D——A 的二进制帧在 D 里也直接复用，不是丢弃的工作。
+
+### 6.3 诚实说明
+
+- **代码事实**：轮询周期（2/10/50/100 ms）、`ms ≥ 10`、`uart_rx` 的 `list(payload)` 编码、双 CDC 共口，
+  均直接读自 `src/fw/code.py`；PWM 低到 0.1 Hz 是 README 路线图里记录的实测值。
+- **推断，未实测**：JSON 膨胀按数字数组典型 3–4 字节/字节估算；"差三个数量级"是 Python 逐点读与
+  DMA 流的架构级对比，不是本仓库的基准测试结果；B 路线的 10–100 kHz 是行业常规量级，非实测承诺。
+- **外部声明**：C 路线表中的 ~400 kHz / 100 MS/s 来自 PicoLab 项目 README 的自述指标，未在本机复测。
+- USB 全速的理论 12 Mbit/s 与实际可用吞吐（约 0.5–1 MByte/s，且两口共享）不是一回事，
+  改进表里凡涉及带宽的收益都要按后者打折。
+
+## 7. 开发与验证
 
 ```bash
 uv venv -p 3.12 --seed -n .venv
@@ -105,7 +143,7 @@ uv venv -p 3.12 --seed -n .venv
 仓库没有 `tsconfig.json`，直接跑 `npx tsc` 会报 TS5058；显式类型检查命令、构建与部署步骤、完整验证链
 都在 [04 构建指南](./docs/zh/04_FW_Build_Guide.txt)。`npm run build` 走 esbuild，不做类型检查。
 
-## 7. 路线图
+## 8. 路线图
 
 已完成：Web Serial 握手闭环、IO 分配工作台（引脚池 + 泳道、拖拽绑定、自动顶位、即时下发）、
 GPIO / PWM / ADC 泳道（PWM 逐通道可选硬件 slice 或 PIO 状态机，实测低到 0.1 Hz）、ADC 批量波形流 + 示波器、片内温度虚拟通道、MQTT 式事件订阅、
@@ -117,4 +155,9 @@ SPI 总线泳道（按实测引脚组，允许半总线、每条最多 4 路 CS�
 连接时按"板子 > 浏览器 > 空白"取用，冲突才问；卷对代码只读时按板子自报的 `caps.cfg.writable`
 收起保存与删除）、**重启板子**按钮（`reset` 命令，等同按 RESET，动过 `boot.py` 不用再走到板前）。
 
-下一步：独立错误面板。
+下一步：独立错误面板。性能侧的成因分析与四条改进路线（含换 Pico SDK + 虚拟网卡的取舍）见
+[§6 性能瓶颈与改进方向](#6-性能瓶颈与改进方向)。
+
+## 9. 许可证
+
+GPL-3.0，见 [LICENSE](./LICENSE)。Copyright (C) 2026 ra9fael。

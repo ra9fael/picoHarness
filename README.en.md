@@ -101,7 +101,53 @@ Scheduler traps found on real hardware (blocking `stdin.read(1)`, `busio.UART` d
 [04 Build Guide](./docs/en/04_FW_Build_Guide.txt); the wire format is in
 [02 Protocol Reference](./docs/en/02_Library_User_Guide/README.md).
 
-## 6. Development and verification
+## 6. Performance limits and improvement paths
+
+### 6.1 Why it is slow (causes)
+
+Three ceilings stack on top of each other, bottom up:
+
+| Layer | What the code does | Consequence |
+| :--- | :--- | :--- |
+| Interpreter | Everything runs on one CircuitPython VM thread; ADC sampling is per-point Python calls (`_adc_val` → `analogio.value`), never touching FIFO/DMA | The waveform stream's `ms` floor is 10 ms — row rate caps at 100 Hz, and multi-channel is just row-by-row round-robin; roughly three orders of magnitude off a DMA capture path |
+| Scheduling | All five asyncio tasks are sleep-polled: commands 2 ms, UART 10 ms, GPIO 50 ms, ADC 100 ms | GPIO edges resolve at 50 ms granularity — short pulses are always missed; any one command's processing time squeezes every other task's response |
+| Transport | USB full-speed 12 Mbit/s shared by both CDC ports; commands/events are JSON-lines text, and `uart_rx` ships bytes as a `list(payload)` number array | One data byte inflates to 3–4 text bytes; at high UART baud rates JSON encoding/decoding eats both CPU and bandwidth |
+
+Only the PWM generator uses PIO (and only as an output); ADC and digital inputs have no hardware
+capture path at all. So this project's strength is **determinism** (pin arbitration, protocol,
+config persistence), not **throughput** — that is the product positioning, not purely an
+implementation flaw.
+
+### 6.2 Improvement paths (by increasing effort)
+
+| Stage | What to do | What you get | What it costs |
+| :--- | :--- | :--- | :--- |
+| A Protocol slimming (stay on CircuitPython) | Move `uart_rx` / `spi.xfer` / `i2c.xfer` to binary frames (the kind registry already exists), batch high-rate events | CPU and bandwidth free up immediately under load | New frame kinds must land in the protocol docs too |
+| B Native module | Sink the capture path into C (CircuitPython native module), raise batched samples from a DMA ring buffer | Scope bandwidth in the 10–100 kHz class | You own a C build chain; ABI risk across CircuitPython versions |
+| C New firmware stack: Pico SDK + virtual NIC | TinyUSB RNDIS/ECM + lwIP + on-device HTTP/SSE (the PicoLab route); split cores: core0 serves network/UI, core1 does DMA capture; PIO for a logic analyzer | Instrument-class capture (~400 kHz analog, 100 MS/s digital), any browser, no Web Serial, works on phones | Full firmware rewrite; lose the REPL and the "copy .py and go" iteration speed; the dev cycle becomes compile-and-flash |
+| D Hybrid: C firmware, same protocol | Rewrite code.py in C but keep dual CDC + JSON-lines, protocol unchanged | Capture performance up a notch; all 7220 lines of TS UI, tooling and workbench survive | No virtual-NIC browser-compatibility dividend; still a full C rewrite |
+
+The UI already isolates the byte pipe in `core/transport.ts`, so neither C nor D touches the
+workbench or model layers; under C, `mock_serial.js` also stays valid as a regression reference.
+Do A first (about a week, zero hardware risk), then decide between C and D — A's binary frames
+carry over into D unchanged, so it is not throwaway work.
+
+### 6.3 Honest notes
+
+- **Code facts**: the poll periods (2/10/50/100 ms), `ms ≥ 10`, the `uart_rx` `list(payload)`
+  encoding and the shared dual-CDC link all read directly off `src/fw/code.py`; PWM down to 0.1 Hz
+  is a measured value recorded in this README's roadmap.
+- **Inference, not measured**: the JSON inflation is estimated at a typical 3–4 bytes per data
+  byte for number arrays; "three orders of magnitude" is an architectural comparison between
+  per-point Python reads and a DMA stream, not a benchmark from this repository; the 10–100 kHz
+  figure for path B is industry-typical, not a measured promise.
+- **External claims**: the ~400 kHz / 100 MS/s figures in the path-C row come from the PicoLab
+  README's own claims and have not been re-measured here.
+- Theoretical USB full-speed 12 Mbit/s is not the same as usable throughput (roughly 0.5–1
+  MByte/s, shared by both ports); any bandwidth gains in the table above must be discounted to
+  the latter.
+
+## 7. Development and verification
 
 ```bash
 uv venv -p 3.12 --seed -n .venv
@@ -113,7 +159,7 @@ There is no `tsconfig.json` in this repository, so `npx tsc` alone fails; the ex
 command, the build/deploy steps, and the full verification chain are in
 [04 Build Guide](./docs/en/04_FW_Build_Guide.txt). `npm run build` uses esbuild and does not type-check.
 
-## 7. Roadmap
+## 8. Roadmap
 
 Done: Web Serial handshake loop, IO-assignment workbench (pin pool + lanes, drag to bind, automatic
 displacement, instant dispatch), GPIO / PWM / ADC lanes (PWM selectable per channel between a hardware slice and a PIO state machine, measured down to 0.1 Hz), batched ADC waveform stream plus scope,
@@ -128,4 +174,10 @@ when you save it, resolved at connect time as board > browser > empty with a que
 save/delete folded away when the board reports its own volume read-only (`caps.cfg.writable`) — plus a **Reboot board**
 button that runs the `reset` command.
 
-Next: standalone error panel.
+Next: standalone error panel. For the performance-limit analysis and the four improvement paths
+(including the trade-offs of moving to a Pico SDK + virtual NIC stack), see
+[§6 Performance limits and improvement paths](#6-performance-limits-and-improvement-paths).
+
+## 9. License
+
+GPL-3.0, see [LICENSE](./LICENSE). Copyright (C) 2026 ra9fael.
